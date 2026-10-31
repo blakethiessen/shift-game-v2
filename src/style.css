@@ -564,9 +564,9 @@ input[type="range"].retro-slider::-moz-range-thumb {
   position: absolute;
   inset: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 4px;
+  padding: 4px 4px 24px;
   pointer-events: none;
 }
 
@@ -636,6 +636,11 @@ input[type="range"].retro-slider::-moz-range-thumb {
     env(safe-area-inset-bottom, 8px) env(safe-area-inset-left, 8px);
 }
 
+#game-stage:has(.shift-mobile-controls.mobile-mode-online:not(.is-hidden)) #game-canvas {
+  max-height: calc(100dvh - 110px);
+  margin-bottom: 80px;
+}
+
 .mobile-online-util-bar {
   display: flex;
   justify-content: flex-end;
@@ -663,9 +668,11 @@ input[type="range"].retro-slider::-moz-range-thumb {
   touch-action: none;
 }
 
-.mobile-util-btn:active {
+.mobile-util-btn:active,
+.mobile-util-btn.is-active {
   background: #35494f;
   color: var(--color-highlight);
+  border-color: var(--color-highlight);
 }
 
 /* Controls Row inside each Player Station (Bottom-Left = Joystick, Bottom-Right = Actions/Shift) */

@@ -505,14 +505,11 @@ export class InputManager implements IInputManager {
     if (!this.enabled) return;
 
     if (action === 'shift') {
-      if (this.mode === 'online') {
-        if (this.localPlayerId === 1) {
-          this.p1Input.shiftRequestSeq++;
-        } else {
-          this.p2Input.shiftRequestSeq++;
-        }
-      } else {
+      const shiftPlayerId =
+        this.mode === 'online' ? this.localPlayerId : playerId;
+      if (shiftPlayerId === 1) {
         this.p1Input.shiftRequestSeq++;
+      } else {
         this.p2Input.shiftRequestSeq++;
       }
       return;
@@ -557,6 +554,19 @@ export class InputManager implements IInputManager {
       this.endInventoryHold(2);
     } else {
       this.endInventoryHold(playerId);
+    }
+  }
+
+  public cancelVirtualInventoryPress(playerId: PlayerId): void {
+    const pids: PlayerId[] = this.mode === 'online' ? [1, 2] : [playerId];
+    for (const pid of pids) {
+      const tracker = this.invHold[pid];
+      if (tracker.timerId !== null) {
+        clearTimeout(tracker.timerId);
+        tracker.timerId = null;
+      }
+      tracker.activeCode = null;
+      tracker.droppedOnHold = false;
     }
   }
 

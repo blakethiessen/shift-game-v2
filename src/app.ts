@@ -107,6 +107,7 @@ export class ShiftGameApp {
       if (!this.running) return;
       const state = this.engine.getState();
       state.isPaused = !state.isPaused;
+      this.renderCurrentState(0);
     });
 
     this.boundDebugKeyDown = (ev: Event) => {
@@ -393,6 +394,28 @@ export class ShiftGameApp {
   private renderCurrentState(dtMs: number): void {
     const state = this.engine.getState();
     const formattedKeys = this.inputManager.getFormattedKeyStrings();
+    const keyStrings = this.mobileControls.isEnabled()
+      ? {
+          p1: {
+            ...formattedKeys.p1,
+            UseItem: 'USE',
+            Interact: 'ACT',
+            Inventory: 'INV',
+            Ping: 'PING',
+          },
+          p2: {
+            ...formattedKeys.p2,
+            UseItem: 'USE',
+            Interact: 'ACT',
+            Inventory: 'INV',
+            Ping: 'PING',
+          },
+          common: {
+            ...formattedKeys.common,
+            SwitchDimensions: 'SHIFT',
+          },
+        }
+      : formattedKeys;
     this.renderer.render(
       state,
       {
@@ -400,7 +423,7 @@ export class ShiftGameApp {
         mode: this.mode,
         partnerVisibility: this.lobbyConfig.partnerVisibility,
         lightingEnabled: this.lightingEnabled,
-        keyStrings: formattedKeys,
+        keyStrings,
       },
       dtMs
     );

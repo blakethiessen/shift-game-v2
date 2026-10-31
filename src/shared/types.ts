@@ -698,6 +698,7 @@ export interface IInputManager {
   triggerVirtualAction?(playerId: PlayerId, action: VirtualAction): void;
   startVirtualInventoryPress?(playerId: PlayerId): void;
   endVirtualInventoryPress?(playerId: PlayerId): void;
+  cancelVirtualInventoryPress?(playerId: PlayerId): void;
   triggerPause?(): void;
   triggerMute?(): void;
   destroy(): void;

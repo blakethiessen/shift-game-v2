@@ -243,12 +243,16 @@ describe('InputManager', () => {
       expect(p1.useItemSeq).toBe(1);
       expect(p2.pingSeq).toBe(1);
       expect(p2.pingKind).toBe('here');
-      // In Local Mode, either player tapping Shift triggers a dimension shift
-      expect(p1.shiftRequestSeq).toBe(1);
+      // Each player's Shift button increments that player's shiftRequestSeq so both
+      // Cooperative and Individual shift modes work in Local Head-to-Head Mobile Co-op
+      expect(p1.shiftRequestSeq).toBe(0);
       expect(p2.shiftRequestSeq).toBe(1);
+
+      input.triggerVirtualAction(1, 'shift');
+      expect(input.getPlayerInput(1).shiftRequestSeq).toBe(1);
     });
 
-    it('supports virtual inventory tap (<1000ms cycle) and hold (>=1000ms drop)', () => {
+    it('supports virtual inventory tap (<1000ms cycle), hold (>=1000ms drop), and cancel without cycling', () => {
       input.setPlayMode('local', 1);
 
       // Tap < 1000ms -> cycle
@@ -266,6 +270,14 @@ describe('InputManager', () => {
 
       input.endVirtualInventoryPress(2);
       expect(input.getPlayerInput(2).inventoryCycleSeq).toBe(0);
+
+      // Cancel mid-hold (e.g. pointercancel or blur) -> neither cycles nor drops
+      input.startVirtualInventoryPress(1);
+      vi.advanceTimersByTime(400);
+      input.cancelVirtualInventoryPress(1);
+      vi.advanceTimersByTime(1000);
+      expect(input.getPlayerInput(1).inventoryCycleSeq).toBe(1);
+      expect(input.getPlayerInput(1).inventoryDropSeq).toBe(0);
     });
 
     it('routes virtual input to localPlayerId in Online Mode and only increments local shiftRequestSeq', () => {

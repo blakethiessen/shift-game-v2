@@ -270,13 +270,24 @@ describe('ShiftGameApp End-to-End Integration', () => {
     expect(station1).toBeTruthy();
     expect(station2).toBeTruthy();
 
-    // Right-thumb Shift button on P2 station shifts dimensions in Local Co-op
+    // Right-thumb Shift button on P2 station requests Cooperative Shift, and P1 confirms!
+    const shiftBtnP1 = container.querySelector('[data-testid="mobile-btn-shift-p1"]') as HTMLButtonElement;
     const shiftBtnP2 = container.querySelector('[data-testid="mobile-btn-shift-p2"]') as HTMLButtonElement;
+    expect(shiftBtnP1).toBeTruthy();
     expect(shiftBtnP2).toBeTruthy();
     expect(app.getState().evilOnLeft).toBe(false);
+
+    // P2 taps SHIFT -> opens cooperative shift request window and highlights shift buttons
     shiftBtnP2.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
     app.stepFrame(SIMULATION_TICK_MS);
+    expect(app.getState().shiftRequest.requestedBy).toBe(2);
+    expect(shiftBtnP1.classList.contains('is-shift-pending')).toBe(true);
+
+    // P1 taps SHIFT -> confirms cooperative shift!
+    shiftBtnP1.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    app.stepFrame(SIMULATION_TICK_MS);
     expect(app.getState().evilOnLeft).toBe(true);
+    expect(shiftBtnP1.classList.contains('is-shift-pending')).toBe(false);
 
     app.destroy();
   });

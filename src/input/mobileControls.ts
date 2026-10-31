@@ -17,6 +17,7 @@ import { InputManager } from './inputManager';
 export const DEFAULT_JOYSTICK_MAX_RADIUS_PX = 38;
 export const DEFAULT_JOYSTICK_DEADZONE_PX = 10;
 export const OCTANT_THRESHOLD = Math.sin(Math.PI / 8); // ~0.3826834
+export const MOBILE_CONTROLS_STORAGE_KEY = 'shift_game_mobile_controls_v1';
 
 export interface JoystickState {
   up: boolean;
@@ -158,6 +159,7 @@ export interface MobileControlsOptions {
   forceEnabled?: boolean | null;
   viewportSizeProvider?: () => { width: number; height: number };
   canvasFactory?: (w: number, h: number) => HTMLCanvasElement;
+  storage?: Storage | null;
 }
 
 export class MobileControls {
@@ -166,12 +168,16 @@ export class MobileControls {
   private readonly rootEl: HTMLElement;
   private readonly viewportSizeProvider: () => { width: number; height: number };
   private readonly canvasFactory: (w: number, h: number) => HTMLCanvasElement;
+  private readonly storage: Storage | null;
 
   private forceEnabled: boolean | null;
   private detectedTouch = false;
   private sessionActive = false;
   private mode: PlayMode = 'local';
   private localPlayerId: PlayerId = 1;
+
+  private lastMainCanvas: HTMLCanvasElement | null = null;
+  private lastState: GameState | undefined = undefined;
 
   private p1StationEl: HTMLElement | null = null;
   private p2StationEl: HTMLElement | null = null;
@@ -183,6 +189,8 @@ export class MobileControls {
   private p2RotationDeg = 180;
 
   private shiftButtons: HTMLButtonElement[] = [];
+  private pauseButtons: HTMLButtonElement[] = [];
+  private allInteractiveButtons: HTMLButtonElement[] = [];
   private joystickTrackers: ActiveJoystickTracker[] = [];
   private lastPressedJoystick: ActiveJoystickTracker | null = null;
 
@@ -190,11 +198,22 @@ export class MobileControls {
   private readonly boundPointerUp: (e: Event) => void;
   private readonly boundResize: () => void;
   private readonly boundFirstTouch: (e: Event) => void;
+  private readonly boundBlur: () => void;
 
   constructor(options: MobileControlsOptions) {
     this.container = options.container;
     this.inputManager = options.inputManager;
-    this.forceEnabled = options.forceEnabled ?? null;
+    this.storage =
+      options.storage !== undefined
+        ? options.storage
+        : typeof localStorage !== 'undefined'
+        ? localStorage
+        : null;
+
+    this.forceEnabled =
+      options.forceEnabled !== undefined
+        ? options.forceEnabled
+        : this.loadPersistedForceState();
 
     this.viewportSizeProvider =
       options.viewportSizeProvider ??
@@ -218,9 +237,12 @@ export class MobileControls {
     this.rootEl.className = 'shift-mobile-controls is-hidden';
     this.container.appendChild(this.rootEl);
 
-    this.boundPointerMove = (e: Event) => this.handleGlobalPointerMove(e as PointerEvent);
-    this.boundPointerUp = (e: Event) => this.handleGlobalPointerUp(e as PointerEvent);
+    this.boundPointerMove = (e: Event) =>
+      this.handleGlobalPointerMove(e as PointerEvent);
+    this.boundPointerUp = (e: Event) =>
+      this.handleGlobalPointerUp(e as PointerEvent);
     this.boundResize = () => this.updateOrientationLayout();
+    this.boundBlur = () => this.releaseAllInputs();
     this.boundFirstTouch = (e: Event) => {
       const pe = e as PointerEvent;
       if (e.type === 'touchstart' || pe.pointerType === 'touch') {
@@ -239,8 +261,38 @@ export class MobileControls {
       window.addEventListener('pointercancel', this.boundPointerUp);
       window.addEventListener('resize', this.boundResize);
       window.addEventListener('orientationchange', this.boundResize);
-      window.addEventListener('touchstart', this.boundFirstTouch, { passive: true });
-      window.addEventListener('pointerdown', this.boundFirstTouch, { passive: true });
+      window.addEventListener('blur', this.boundBlur);
+      window.addEventListener('touchstart', this.boundFirstTouch, {
+        passive: true,
+      });
+      window.addEventListener('pointerdown', this.boundFirstTouch, {
+        passive: true,
+      });
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.boundBlur);
+    }
+  }
+
+  private loadPersistedForceState(): boolean | null {
+    if (!this.storage) return null;
+    try {
+      const raw = this.storage.getItem(MOBILE_CONTROLS_STORAGE_KEY);
+      if (raw === 'on') return true;
+      if (raw === 'off') return false;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private savePersistedForceState(val: boolean | null): void {
+    if (!this.storage) return;
+    try {
+      const str = val === null ? 'auto' : val ? 'on' : 'off';
+      this.storage.setItem(MOBILE_CONTROLS_STORAGE_KEY, str);
+    } catch {
+      // Ignore storage errors
     }
   }
 
@@ -271,6 +323,7 @@ export class MobileControls {
 
   public setForceEnabled(enabled: boolean | null): void {
     this.forceEnabled = enabled;
+    this.savePersistedForceState(enabled);
     if (this.sessionActive) {
       this.render();
     }
@@ -330,13 +383,13 @@ export class MobileControls {
       stationEl.setAttribute('data-rotation', String(rotationDeg));
       if (layout.splitAxis === 'horizontal') {
         const stationW = height;
-        const stationH = Math.floor(width / 2);
+        const stationH = Math.round(width / 2);
         stationEl.style.width = `${stationW}px`;
         stationEl.style.height = `${stationH}px`;
         stationEl.style.transform = `rotate(${rotationDeg}deg)`;
       } else {
         const stationW = width;
-        const stationH = Math.floor(height / 2);
+        const stationH = Math.round(height / 2);
         stationEl.style.width = `${stationW}px`;
         stationEl.style.height = `${stationH}px`;
         stationEl.style.transform = `rotate(${rotationDeg}deg)`;
@@ -351,6 +404,11 @@ export class MobileControls {
     mainCanvas: HTMLCanvasElement,
     state?: GameState
   ): void {
+    this.lastMainCanvas = mainCanvas;
+    if (state !== undefined) {
+      this.lastState = state;
+    }
+
     if (!this.sessionActive || !this.isEnabled()) {
       return;
     }
@@ -400,16 +458,21 @@ export class MobileControls {
       }
     }
 
-    if (state) {
-      const shiftPending = state.shiftRequest.requestedBy !== null;
+    const activeState = state ?? this.lastState;
+    if (activeState) {
+      const shiftPending = activeState.shiftRequest.requestedBy !== null;
       for (const btn of this.shiftButtons) {
         btn.classList.toggle('is-shift-pending', shiftPending);
+      }
+      for (const pBtn of this.pauseButtons) {
+        pBtn.classList.toggle('is-active', activeState.isPaused);
+        pBtn.textContent = activeState.isPaused ? 'RESUME' : 'PAUSE';
       }
     }
   }
 
   private render(): void {
-    this.releaseAllJoysticks();
+    this.releaseAllInputs();
     this.rootEl.innerHTML = '';
     this.p1StationEl = null;
     this.p2StationEl = null;
@@ -418,6 +481,8 @@ export class MobileControls {
     this.p1StationCtx = null;
     this.p2StationCtx = null;
     this.shiftButtons = [];
+    this.pauseButtons = [];
+    this.allInteractiveButtons = [];
     this.joystickTrackers = [];
 
     if (!this.sessionActive || !this.isEnabled()) {
@@ -440,6 +505,10 @@ export class MobileControls {
       this.rootEl.classList.remove('mobile-mode-local');
       this.renderOnlineSinglePlayer();
     }
+
+    if (this.lastMainCanvas) {
+      this.syncFromMainCanvas(this.lastMainCanvas, this.lastState);
+    }
   }
 
   private renderLocalHeadToHead(): void {
@@ -454,7 +523,6 @@ export class MobileControls {
     const slotB = document.createElement('div');
     slotB.className = 'mobile-station-slot slot-second';
 
-    // Create P1 (Left dimension) and P2 (Right dimension) stations
     const p1Built = this.createPlayerStation(
       1,
       'p1',
@@ -476,8 +544,6 @@ export class MobileControls {
     this.p2StationCanvas = p2Built.canvas;
     this.p2StationCtx = p2Built.ctx;
 
-    // In horizontal split (Landscape), Left slot is P1 (+90deg) and Right slot is P2 (-90deg).
-    // In vertical split (Portrait), Top slot is P2 (180deg) and Bottom slot is P1 (0deg).
     if (layout.splitAxis === 'horizontal') {
       slotA.appendChild(this.p1StationEl);
       slotB.appendChild(this.p2StationEl);
@@ -521,6 +587,8 @@ export class MobileControls {
       e.stopPropagation();
       this.inputManager.triggerPause();
     });
+    this.pauseButtons.push(pauseBtn);
+    this.allInteractiveButtons.push(pauseBtn);
 
     const muteBtn = document.createElement('button');
     muteBtn.type = 'button';
@@ -532,6 +600,7 @@ export class MobileControls {
       e.stopPropagation();
       this.inputManager.triggerMute();
     });
+    this.allInteractiveButtons.push(muteBtn);
 
     bar.appendChild(pauseBtn);
     bar.appendChild(muteBtn);
@@ -555,7 +624,7 @@ export class MobileControls {
     stationEl.setAttribute('data-rotation', String(getRotationDeg()));
 
     let canvas: HTMLCanvasElement | null = null;
-    let ctx: CanvasRenderingContext2D | null = null;
+    const ctx: CanvasRenderingContext2D | null = null;
 
     if (includeStationCanvas) {
       const viewportWrap = document.createElement('div');
@@ -597,6 +666,10 @@ export class MobileControls {
       ev.preventDefault();
       ev.stopPropagation();
       const pe = ev as PointerEvent;
+      // Ignore stray second-finger touch if this joystick is already actively held by a pointerId
+      if (tracker.active && tracker.pointerId !== null) {
+        return;
+      }
       tracker.active = true;
       tracker.pointerId = pe.pointerId !== undefined ? pe.pointerId : null;
       this.lastPressedJoystick = tracker;
@@ -651,23 +724,63 @@ export class MobileControls {
     invBtn.className = 'mobile-action-btn btn-inv';
     invBtn.setAttribute('data-testid', `mobile-btn-inv-${suffix}`);
     invBtn.innerHTML = '<span>INV</span><small>DROP</small>';
+    this.allInteractiveButtons.push(invBtn);
 
-    const endInvPress = (e: Event) => {
-      e.preventDefault();
-      if (!invBtn.classList.contains('is-pressed')) return;
-      invBtn.classList.remove('is-pressed');
-      this.inputManager.endVirtualInventoryPress(playerId);
-    };
+    let activeInvPointerId: number | null = null;
 
     invBtn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      const pe = e as PointerEvent;
+      if (invBtn.classList.contains('is-pressed') && activeInvPointerId !== null) {
+        return;
+      }
+      activeInvPointerId = pe.pointerId !== undefined ? pe.pointerId : null;
       invBtn.classList.add('is-pressed');
+      if (
+        pe.pointerId !== undefined &&
+        typeof invBtn.setPointerCapture === 'function'
+      ) {
+        try {
+          invBtn.setPointerCapture(pe.pointerId);
+        } catch {
+          // Ignore synthetic events in tests
+        }
+      }
       this.inputManager.startVirtualInventoryPress(playerId);
     });
-    invBtn.addEventListener('pointerup', endInvPress);
-    invBtn.addEventListener('pointercancel', endInvPress);
-    invBtn.addEventListener('pointerleave', endInvPress);
+
+    invBtn.addEventListener('pointerup', (e) => {
+      e.preventDefault();
+      const pe = e as PointerEvent;
+      if (!invBtn.classList.contains('is-pressed')) return;
+      if (
+        activeInvPointerId !== null &&
+        pe.pointerId !== undefined &&
+        pe.pointerId !== activeInvPointerId
+      ) {
+        return;
+      }
+      activeInvPointerId = null;
+      invBtn.classList.remove('is-pressed');
+      this.inputManager.endVirtualInventoryPress(playerId);
+    });
+
+    invBtn.addEventListener('pointercancel', (e) => {
+      e.preventDefault();
+      const pe = e as PointerEvent;
+      if (!invBtn.classList.contains('is-pressed')) return;
+      if (
+        activeInvPointerId !== null &&
+        pe.pointerId !== undefined &&
+        pe.pointerId !== activeInvPointerId
+      ) {
+        return;
+      }
+      activeInvPointerId = null;
+      invBtn.classList.remove('is-pressed');
+      this.inputManager.cancelVirtualInventoryPress(playerId);
+    });
 
     const pingBtn = this.createActionButton(
       `mobile-btn-ping-${suffix}`,
@@ -702,6 +815,7 @@ export class MobileControls {
     btn.className = className;
     btn.setAttribute('data-testid', testId);
     btn.textContent = label;
+    this.allInteractiveButtons.push(btn);
 
     btn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -787,25 +901,34 @@ export class MobileControls {
     });
   }
 
-  private releaseAllJoysticks(): void {
+  private releaseAllInputs(): void {
     for (const tracker of this.joystickTrackers) {
       if (tracker.active) {
         this.resetJoystickTracker(tracker);
       }
     }
+    for (const btn of this.allInteractiveButtons) {
+      btn.classList.remove('is-pressed');
+    }
+    this.inputManager.cancelVirtualInventoryPress(1);
+    this.inputManager.cancelVirtualInventoryPress(2);
     this.lastPressedJoystick = null;
   }
 
   public destroy(): void {
-    this.releaseAllJoysticks();
+    this.releaseAllInputs();
     if (typeof window !== 'undefined') {
       window.removeEventListener('pointermove', this.boundPointerMove);
       window.removeEventListener('pointerup', this.boundPointerUp);
       window.removeEventListener('pointercancel', this.boundPointerUp);
       window.removeEventListener('resize', this.boundResize);
       window.removeEventListener('orientationchange', this.boundResize);
+      window.removeEventListener('blur', this.boundBlur);
       window.removeEventListener('touchstart', this.boundFirstTouch);
       window.removeEventListener('pointerdown', this.boundFirstTouch);
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.boundBlur);
     }
     this.rootEl.remove();
   }

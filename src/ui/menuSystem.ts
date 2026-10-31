@@ -1012,7 +1012,7 @@ export class MenuSystem {
 
     const prompt = document.createElement('div');
     prompt.className = 'tutorial-prompt';
-    prompt.textContent = 'Press any key to enter the mansion...';
+    prompt.textContent = 'Press any key to enter the mansion... (or tap)';
     card.appendChild(prompt);
 
     card.addEventListener('click', () => {
@@ -1058,7 +1058,8 @@ export class MenuSystem {
 
     const prompt = document.createElement('div');
     prompt.className = 'banner-prompt';
-    prompt.textContent = 'Press ENTER, SPACE, or ESC to return to Start Screen';
+    prompt.textContent =
+      'Press ENTER, SPACE, or ESC to return to Start Screen (or tap)';
     banner.appendChild(prompt);
 
     banner.addEventListener('click', () => {

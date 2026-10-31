@@ -199,8 +199,11 @@ describe('MobileControls', () => {
 
       expect(input.getPlayerInput(1).interactSeq).toBe(1);
       expect(input.getPlayerInput(2).useItemSeq).toBe(1);
-      expect(input.getPlayerInput(1).shiftRequestSeq).toBe(1);
+      expect(input.getPlayerInput(1).shiftRequestSeq).toBe(0);
       expect(input.getPlayerInput(2).shiftRequestSeq).toBe(1);
+
+      shift1.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      expect(input.getPlayerInput(1).shiftRequestSeq).toBe(1);
     });
 
     it('renders single-player Online Mode mobile controls with left-thumb joystick and right-thumb action/shift cluster', () => {
@@ -322,6 +325,130 @@ describe('MobileControls', () => {
       muteBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
       expect(onPause).toHaveBeenCalledTimes(1);
       expect(onMute).toHaveBeenCalledTimes(1);
+    });
+
+    it('isolates multi-touch pointerIds, prevents second-finger joystick stealing, ignores pointerleave on INV hold, and resets UI on window blur', () => {
+      mobile = new MobileControls({
+        container,
+        inputManager: input,
+        forceEnabled: true,
+        viewportSizeProvider: () => ({ width: 390, height: 844 }),
+      });
+      mobile.setSessionMode('local', 1, true);
+
+      const joy1 = container.querySelector('[data-testid="mobile-joystick-p1"]') as HTMLElement;
+      const joy2 = container.querySelector('[data-testid="mobile-joystick-p2"]') as HTMLElement;
+      const inv1 = container.querySelector('[data-testid="mobile-btn-inv-p1"]') as HTMLButtonElement;
+
+      vi.spyOn(joy1, 'getBoundingClientRect').mockReturnValue({
+        left: 20,
+        top: 700,
+        width: 100,
+        height: 100,
+        right: 120,
+        bottom: 800,
+        x: 20,
+        y: 700,
+        toJSON: () => ({}),
+      });
+      vi.spyOn(joy2, 'getBoundingClientRect').mockReturnValue({
+        left: 270,
+        top: 40,
+        width: 100,
+        height: 100,
+        right: 370,
+        bottom: 140,
+        x: 270,
+        y: 40,
+        toJSON: () => ({}),
+      });
+
+      const makePointerEvent = (
+        type: string,
+        pointerId: number,
+        clientX = 0,
+        clientY = 0
+      ) => {
+        const ev = new MouseEvent(type, { bubbles: true, clientX, clientY });
+        Object.defineProperty(ev, 'pointerId', { value: pointerId });
+        return ev;
+      };
+
+      // P1 holds joystick with pointerId 10 and moves Up (clientY: 750 -> 710)
+      joy1.dispatchEvent(makePointerEvent('pointerdown', 10, 70, 750));
+      window.dispatchEvent(makePointerEvent('pointermove', 10, 70, 710));
+      expect(input.getPlayerInput(1).up).toBe(true);
+
+      // Second stray finger (pointerId 99) touches joy1 and lifts -> must NOT steal or reset pointerId 10!
+      joy1.dispatchEvent(makePointerEvent('pointerdown', 99, 70, 750));
+      window.dispatchEvent(makePointerEvent('pointerup', 99, 70, 750));
+      expect(input.getPlayerInput(1).up).toBe(true);
+      expect(joy1.classList.contains('is-active')).toBe(true);
+
+      // P2 (180deg top station) simultaneously drags joy2 with pointerId 20 (+y screen: 90 -> 130 is Up in P2's 180deg frame!)
+      joy2.dispatchEvent(makePointerEvent('pointerdown', 20, 320, 90));
+      window.dispatchEvent(makePointerEvent('pointermove', 20, 320, 130));
+      expect(input.getPlayerInput(2).up).toBe(true);
+
+      // P1 presses INV button (pointerId 11) and thumb slightly drifts triggering pointerleave before 1000ms
+      inv1.dispatchEvent(makePointerEvent('pointerdown', 11));
+      vi.advanceTimersByTime(300);
+      inv1.dispatchEvent(makePointerEvent('pointerleave', 11));
+      // Must NOT prematurely cycle on pointerleave while thumb is still held down!
+      expect(input.getPlayerInput(1).inventoryCycleSeq).toBe(0);
+
+      // Reaching 1000ms while still held drops the item!
+      vi.advanceTimersByTime(700);
+      expect(input.getPlayerInput(1).inventoryDropSeq).toBe(1);
+      inv1.dispatchEvent(makePointerEvent('pointerup', 11));
+      expect(input.getPlayerInput(1).inventoryCycleSeq).toBe(0);
+
+      // Window blur resets active joysticks and held button UI states
+      inv1.dispatchEvent(makePointerEvent('pointerdown', 12));
+      expect(inv1.classList.contains('is-pressed')).toBe(true);
+      window.dispatchEvent(new Event('blur'));
+      expect(joy1.classList.contains('is-active')).toBe(false);
+      expect(joy2.classList.contains('is-active')).toBe(false);
+      expect(inv1.classList.contains('is-pressed')).toBe(false);
+    });
+
+    it('auto-enables on first touch event in Auto mode and immediately blits cached mainCanvas to station canvases', () => {
+      localStorage.clear();
+      const drawImageSpies: Array<ReturnType<typeof vi.fn>> = [];
+      mobile = new MobileControls({
+        container,
+        inputManager: input,
+        forceEnabled: null,
+        viewportSizeProvider: () => ({ width: 390, height: 844 }),
+        canvasFactory: (w, h) => {
+          const c = document.createElement('canvas');
+          c.width = w;
+          c.height = h;
+          const drawImage = vi.fn();
+          drawImageSpies.push(drawImage);
+          vi.spyOn(c, 'getContext').mockReturnValue({
+            clearRect: vi.fn(),
+            drawImage,
+          } as unknown as CanvasRenderingContext2D);
+          return c;
+        },
+      });
+
+      const mainCanvas = document.createElement('canvas');
+      mainCanvas.width = 1000;
+      mainCanvas.height = 650;
+
+      // Session starts before touch is detected
+      mobile.setSessionMode('local', 1, true);
+      mobile.syncFromMainCanvas(mainCanvas);
+      expect(mobile.isEnabled()).toBe(false);
+
+      // User touches the screen -> auto-enables and immediately blits mainCanvas!
+      window.dispatchEvent(new Event('touchstart'));
+      expect(mobile.isEnabled()).toBe(true);
+      expect(drawImageSpies.length).toBe(2);
+      expect(drawImageSpies[0]).toHaveBeenCalledWith(mainCanvas, 0, 0, 500, 650, 0, 0, 500, 650);
+      expect(drawImageSpies[1]).toHaveBeenCalledWith(mainCanvas, 500, 0, 500, 650, 0, 0, 500, 650);
     });
   });
 });

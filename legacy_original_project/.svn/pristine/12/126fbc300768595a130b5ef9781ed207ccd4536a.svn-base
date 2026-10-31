@@ -1,0 +1,30 @@
+* {
+    margin: 0;
+    padding: 0;
+}
+
+@font-face {
+    font-family: 'FixedSys';
+    src: url('fonts/fixedSys/Fixedsys500c.eot') format('embedded-opentype'),
+         url('fonts/fixedSys/Fixedsys500c.otf') format('otf'),
+         url('fonts/fixedSys/Fixedsys500c.woff') format('woff'),
+         url('fonts/fixedSys/Fixedsys500c.ttf') format('truetype'),
+         url('fonts/fixedSys/Fixedsys500c.svg') format('svg');
+}
+
+body, html {
+    margin:0;
+    padding: 0;
+    overflow: hidden;
+    color: black;
+}
+
+#cr-stage {
+    margin:5px auto;
+    color:white;
+}
+
+h1 {
+    color: white;
+    font-size: 14px;
+}

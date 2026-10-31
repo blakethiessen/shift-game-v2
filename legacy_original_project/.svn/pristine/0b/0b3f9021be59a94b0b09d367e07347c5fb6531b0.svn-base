@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Shift: The Game</title>
+    <meta charset="UTF-8">
+    <link rel='stylesheet' href='style.css'>
+    <script src="scripts/core/crafty.js"></script>
+    <script src="scripts/booksAndMemos.js"></script>
+    <script src="scripts/effects/flashFX.js"></script>
+    <script src="scripts/effects/lightingFX.js"></script>
+    <script src="scripts/core/levels.js"></script>
+    <script src="scripts/global.js"></script>
+    <script src="scripts/animation.js"></script>
+    <script src="scripts/controlsKeyMap.js"></script>
+    <script src="scripts/sprites.js"></script>
+    <script src="scripts/menus.js"></script>
+    <script src="scripts/persistence.js"></script>
+    <script src="scripts/monster/pathFinding.js"></script>
+    <script src="scripts/monster/monsters.js"></script>
+    <script src="scripts/monster/dimensionTear.js"></script>
+    <script src="scripts/player/inventory.js"></script>
+    <script src="scripts/player/playerControl.js"></script>
+    <script src="scripts/player/player.js"></script>
+    <script src="scripts/miscComponents.js"></script>
+    <script src="scripts/core/tiles.js"></script>
+    <script src="scripts/items.js"></script>
+    <script src="scripts/booksAndMemos.js"></script>
+    <script src="scripts/worldObjects.js"></script>
+    <script src="scripts/audio.js"></script>
+    <script src="scripts/menus.js"></script>
+    <script src="scripts/tutorialScene.js"></script>
+    <script src="scripts/gameScene.js"></script>
+    <script src="game.js"></script>
+
+    <!--<script type="text/javascript">-->
+
+        <!--var _gaq = _gaq || [];-->
+        <!--_gaq.push(['_setAccount', 'UA-38055927-1']);-->
+        <!--_gaq.push(['_trackPageview']);-->
+
+        <!--(function() {-->
+            <!--var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;-->
+            <!--ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';-->
+            <!--var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);-->
+        <!--})();-->
+
+    <!--</script>-->
+</head>
+<body>
+</body>
+</html>

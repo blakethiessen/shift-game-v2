@@ -336,9 +336,17 @@ describe('puzzlesAndWorld', () => {
     engine.loadRoom('pressurePlateRoom1');
     state = engine.getState();
 
-    // Tick in pressurePlateRoom1: safePressurePlatesPressed must stay 2 (not drop to 0 or increment to 4!)
+    // Tick in pressurePlateRoom1: safePressurePlatesPressed must stay 2 AND plates must remain visually touched (true)
     engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
     expect(state.safePressurePlatesPressed).toBe(2);
+    expect(
+      state.room.worlds.neutral.pressurePlates.find((p) => p.kind === 'safe')!
+        .touched
+    ).toBe(true);
+    expect(
+      state.room.worlds.dangerous.pressurePlates.find((p) => p.kind === 'safe')!
+        .touched
+    ).toBe(true);
 
     // Attempting to step on or place a box on the already-satisfied plates in pressurePlateRoom1 does not double-count
     state.players[0].x = nSafePlate.x;

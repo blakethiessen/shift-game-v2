@@ -395,7 +395,11 @@ export function updateWorldObjectsAndDoors(
           state.safePressurePlatesPressed++;
         }
         openSafesInRoom(state);
-      } else if (plate.touched === true && !isOverlapped) {
+      } else if (
+        plate.touched === true &&
+        !isOverlapped &&
+        !(persist && persist.safePlatesPressedIds.includes(plate.id))
+      ) {
         plate.touched = false;
       }
     }

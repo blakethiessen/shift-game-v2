@@ -792,6 +792,8 @@ export class AudioManager implements IAudioManager {
     }
 
     this.stopMusic();
+    this.processedEventIds.clear();
+    this.lastProcessedTick = -1;
   }
 
   public getActiveChannelCount(): number {

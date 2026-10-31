@@ -213,7 +213,19 @@ describe('MenuSystem', () => {
     expect(container.textContent).toContain('Press any key to enter the mansion...');
     expect(container.textContent).toContain('G');
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
+    // Bare modifier keys (ShiftLeft) should NOT start the game
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'ShiftLeft', key: 'Shift' }));
+    expect(onStartLocal).not.toHaveBeenCalled();
+    expect(menu.getCurrentScreen()).toBe('tutorial');
+
+    // Escape on Tutorial should return to Start screen without starting the game
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', key: 'Escape' }));
+    expect(onStartLocal).not.toHaveBeenCalled();
+    expect(menu.getCurrentScreen()).toBe('start');
+
+    // Re-open tutorial and press Space -> starts local game
+    menu.showScreen('tutorial');
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', key: ' ' }));
     expect(onStartLocal).toHaveBeenCalled();
   });
 

@@ -110,9 +110,23 @@ export class ShiftGameApp {
       this.inputEventTarget.addEventListener('keydown', this.boundDebugKeyDown);
     }
 
-    // Subscribe to P2P network packets
+    // Subscribe to P2P network packets and mid-game disconnect/error events
     this.peerManager.onPacket((packet: NetPacket) => {
       this.handleNetPacket(packet);
+    });
+    this.peerManager.onStateChange((state) => {
+      if (
+        this.running &&
+        this.mode === 'online' &&
+        (state === 'disconnected' || state === 'error')
+      ) {
+        this.running = false;
+        this.inputManager.setEnabled(false);
+        this.audioManager.stopAll();
+        this.clientInputTracker.reset();
+        this.renderer.resizeForMode('local');
+        this.menuSystem.showScreen('lobby');
+      }
     });
 
     this.menuSystem = new MenuSystem({

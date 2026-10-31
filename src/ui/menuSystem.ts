@@ -278,6 +278,28 @@ export class MenuSystem {
     }
 
     if (this.currentScreen === 'tutorial') {
+      if (
+        e.key === 'Shift' ||
+        e.key === 'Control' ||
+        e.key === 'Alt' ||
+        e.key === 'Meta' ||
+        e.code === 'ShiftLeft' ||
+        e.code === 'ShiftRight' ||
+        e.code === 'ControlLeft' ||
+        e.code === 'ControlRight' ||
+        e.code === 'AltLeft' ||
+        e.code === 'AltRight' ||
+        e.code === 'MetaLeft' ||
+        e.code === 'MetaRight'
+      ) {
+        return;
+      }
+      if (e.code === 'Escape' || e.key === 'Escape') {
+        e.preventDefault();
+        this.audioManager.playSound('menuSelect');
+        this.showScreen('start');
+        return;
+      }
       e.preventDefault();
       this.audioManager.playSound('menuSelect');
       this.startLocalGameFromTutorial();
@@ -320,8 +342,11 @@ export class MenuSystem {
       if (e.code === 'Escape' || e.code === 'Enter' || e.code === 'Space') {
         e.preventDefault();
         this.audioManager.playSound('menuSelect');
-        this.callbacks.onReturnToTitle?.();
-        this.showScreen('start');
+        if (this.callbacks.onReturnToTitle) {
+          this.callbacks.onReturnToTitle();
+        } else {
+          this.showScreen('start');
+        }
       }
     }
   }
@@ -1008,8 +1033,11 @@ export class MenuSystem {
 
     banner.addEventListener('click', () => {
       this.audioManager.playSound('menuSelect');
-      this.callbacks.onReturnToTitle?.();
-      this.showScreen('start');
+      if (this.callbacks.onReturnToTitle) {
+        this.callbacks.onReturnToTitle();
+      } else {
+        this.showScreen('start');
+      }
     });
 
     this.rootEl.appendChild(banner);

@@ -399,7 +399,13 @@ export class GameRenderer implements IGameRenderer {
   }
 
   private consumeFlashEvents(state: GameState): void {
+    if (state.tick <= 1 && state.events.length === 0) {
+      this.lastProcessedEventId = 0;
+    }
     for (const ev of state.events) {
+      if (ev.eventId < this.lastProcessedEventId && state.tick <= 2) {
+        this.lastProcessedEventId = 0;
+      }
       if (ev.eventId > this.lastProcessedEventId) {
         this.lastProcessedEventId = ev.eventId;
         if (ev.type === 'flashScreen' && ev.color) {

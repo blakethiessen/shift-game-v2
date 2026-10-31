@@ -65,6 +65,10 @@ body {
   min-height: 650px;
 }
 
+#game-stage:has(.shift-menu-overlay.is-hidden) {
+  min-width: 500px;
+}
+
 #game-canvas {
   display: block;
   image-rendering: pixelated;

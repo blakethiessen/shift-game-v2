@@ -193,6 +193,11 @@ describe('ShiftGameApp End-to-End Integration', () => {
     expect(clientApp.getState().evilOnLeft).toBe(true);
     expect(hostApp.getState().shiftRequest.requestedBy).toBeNull();
 
+    // 4. Mid-game disconnect from Client -> Host detects disconnect, stops running, and returns to Lobby screen
+    clientPeer.disconnect();
+    expect(hostApp.isRunning()).toBe(false);
+    expect(hostCanvas.width).toBe(1000);
+
     // Returning to title in online mode disconnects PeerManager cleanly
     const disconnectSpy = vi.spyOn(hostPeer, 'disconnect');
     hostApp.returnToTitle();

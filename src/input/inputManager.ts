@@ -399,10 +399,37 @@ export class InputManager implements IInputManager {
 
     if (this.mode === 'online') {
       // In Online Mode, both P1 and P2 key sets trigger discrete actions for the local player
-      this.triggerDiscreteActionsForPlayer(1, code, this.settings.p1, true);
-      this.triggerDiscreteActionsForPlayer(1, code, this.settings.p2, false);
-      this.triggerDiscreteActionsForPlayer(2, code, this.settings.p1, true);
-      this.triggerDiscreteActionsForPlayer(2, code, this.settings.p2, false);
+      // (deduplicated per action so shared bindings only increment once per keydown)
+      for (const pid of [1, 2] as PlayerId[]) {
+        const targetInput = pid === 1 ? this.p1Input : this.p2Input;
+        if (
+          this.matchesActionForGroup(code, this.settings.p1, 'UseItem', true) ||
+          this.matchesActionForGroup(code, this.settings.p2, 'UseItem', false)
+        ) {
+          targetInput.useItemSeq++;
+        }
+        if (
+          this.matchesActionForGroup(code, this.settings.p1, 'Interact', true) ||
+          this.matchesActionForGroup(code, this.settings.p2, 'Interact', false)
+        ) {
+          targetInput.interactSeq++;
+        }
+        if (
+          this.matchesActionForGroup(code, this.settings.p1, 'Inventory', true) ||
+          this.matchesActionForGroup(code, this.settings.p2, 'Inventory', false)
+        ) {
+          this.startInventoryHold(pid, code);
+        }
+        if (
+          this.matchesActionForGroup(code, this.settings.p1, 'Ping', true) ||
+          this.matchesActionForGroup(code, this.settings.p2, 'Ping', false)
+        ) {
+          targetInput.pingSeq++;
+          const kinds: PingKind[] = ['here', 'action', 'wait'];
+          targetInput.pingKind =
+            kinds[(targetInput.pingSeq - 1) % kinds.length];
+        }
+      }
     } else {
       this.triggerDiscreteActionsForPlayer(1, code, this.settings.p1, true);
       this.triggerDiscreteActionsForPlayer(2, code, this.settings.p2, false);

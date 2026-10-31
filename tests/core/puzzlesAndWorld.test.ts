@@ -309,4 +309,43 @@ describe('puzzlesAndWorld', () => {
     expect(state.room.swooshTriggered).toBe(true);
     expect(state.room.worlds.neutral.lamps[0].isOn).toBe(!initialOn);
   });
+
+  it('persists SafePressurePlate activation across room transitions without decrementing or allowing duplicate farming', () => {
+    const engine = new GameEngine(42);
+    engine.loadRoom('pressurePlateRoom1');
+    let state = engine.getState();
+
+    const nSafePlate = state.room.worlds.neutral.pressurePlates.find(
+      (p) => p.kind === 'safe'
+    )!;
+    const dSafePlate = state.room.worlds.dangerous.pressurePlates.find(
+      (p) => p.kind === 'safe'
+    )!;
+
+    // Push boxes onto both SafePressurePlates in pressurePlateRoom1
+    state.room.worlds.neutral.boxes[0].x = nSafePlate.x;
+    state.room.worlds.neutral.boxes[0].y = nSafePlate.y;
+    state.room.worlds.dangerous.boxes[0].x = dSafePlate.x;
+    state.room.worlds.dangerous.boxes[0].y = dSafePlate.y;
+
+    engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
+    expect(state.safePressurePlatesPressed).toBe(2);
+
+    // Leave pressurePlateRoom1 -> safeRoom, then re-enter pressurePlateRoom1
+    engine.loadRoom('safeRoom');
+    engine.loadRoom('pressurePlateRoom1');
+    state = engine.getState();
+
+    // Tick in pressurePlateRoom1: safePressurePlatesPressed must stay 2 (not drop to 0 or increment to 4!)
+    engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
+    expect(state.safePressurePlatesPressed).toBe(2);
+
+    // Attempting to step on or place a box on the already-satisfied plates in pressurePlateRoom1 does not double-count
+    state.players[0].x = nSafePlate.x;
+    state.players[0].y = nSafePlate.y;
+    state.players[1].x = dSafePlate.x;
+    state.players[1].y = dSafePlate.y;
+    engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
+    expect(state.safePressurePlatesPressed).toBe(2);
+  });
 });

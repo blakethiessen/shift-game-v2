@@ -128,4 +128,33 @@ describe('shiftModes', () => {
     engine.tick(16.67, p1In, p2In);
     expect(state.evilOnLeft).toBe(false);
   });
+
+  it('sets currentlyShifting during a shift transition and clears it once shiftTimerMs elapses', () => {
+    const engine = new GameEngine(42);
+    const state = engine.getState();
+
+    const p1In = createDefaultPlayerInput();
+    const p2In = createDefaultPlayerInput();
+    p1In.shiftRequestSeq = 1;
+    p2In.shiftRequestSeq = 1;
+    engine.tick(16.67, p1In, p2In);
+
+    expect(state.evilOnLeft).toBe(true);
+    expect(state.currentlyShifting).toBe(true);
+    expect(state.shiftTimerMs).toBeGreaterThan(0);
+
+    // Immediate second shift attempt on next frame while currentlyShifting is true -> blocked!
+    p1In.shiftRequestSeq = 2;
+    p2In.shiftRequestSeq = 2;
+    engine.tick(16.67, p1In, p2In);
+    expect(state.evilOnLeft).toBe(true);
+
+    // Advance past shiftTimerMs -> currentlyShifting clears and shifting works again
+    engine.tick(350, p1In, p2In);
+    expect(state.currentlyShifting).toBe(false);
+    p1In.shiftRequestSeq = 3;
+    p2In.shiftRequestSeq = 3;
+    engine.tick(16.67, p1In, p2In);
+    expect(state.evilOnLeft).toBe(false);
+  });
 });

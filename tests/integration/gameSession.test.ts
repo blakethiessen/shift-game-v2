@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ShiftGameApp } from '../../src/app';
+import { AudioManager } from '../../src/audio/audioManager';
 import { InMemoryPeerBus, PeerManager } from '../../src/net/peerManager';
 import { SIMULATION_TICK_MS } from '../../src/shared/types';
 
@@ -192,7 +193,48 @@ describe('ShiftGameApp End-to-End Integration', () => {
     expect(clientApp.getState().evilOnLeft).toBe(true);
     expect(hostApp.getState().shiftRequest.requestedBy).toBeNull();
 
+    // Returning to title in online mode disconnects PeerManager cleanly
+    const disconnectSpy = vi.spyOn(hostPeer, 'disconnect');
+    hostApp.returnToTitle();
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+
     hostApp.destroy();
     clientApp.destroy();
+  });
+
+  it('dispatches each playSound GameEvent exactly once per tick (no duplicate audio playback)', () => {
+    const canvas = createMockCanvas();
+    const uiContainer = document.createElement('div');
+    document.body.appendChild(canvas);
+    document.body.appendChild(uiContainer);
+
+    const realAudio = new AudioManager();
+    const playSoundSpy = vi.spyOn(realAudio, 'playSound');
+
+    const inputTarget = new EventTarget();
+    const app = new ShiftGameApp({
+      canvas,
+      container: uiContainer,
+      audioManager: realAudio,
+      inputTarget,
+      canvasFactory: () => createMockCanvas(),
+      autoStartLoop: false,
+    });
+
+    app.startLocalGame();
+    playSoundSpy.mockClear();
+
+    // Trigger dimension shift -> emits 'shift' playSound event
+    inputTarget.dispatchEvent(new KeyboardEvent('keydown', { code: 'ShiftLeft' }));
+    app.stepFrame(SIMULATION_TICK_MS);
+    inputTarget.dispatchEvent(new KeyboardEvent('keyup', { code: 'ShiftLeft' }));
+
+    // Ensure 'shift' sound is played exactly once (not duplicated by ShiftGameApp + AudioManager)
+    const shiftCalls = playSoundSpy.mock.calls.filter(
+      (call) => call[0] === 'shift'
+    );
+    expect(shiftCalls.length).toBe(1);
+
+    app.destroy();
   });
 });

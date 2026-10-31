@@ -928,4 +928,19 @@ export function applyRoomPersistence(
     statue.blackKeySpawned = persistence.statue.blackKeySpawned;
     statue.popUpText = formatStatuePopUpText(statue);
   }
+
+  // 10. Restore latched SafePressurePlate states
+  if (persistence.safePlatesPressedIds.length > 0) {
+    for (const plate of [
+      ...room.worlds.neutral.pressurePlates,
+      ...room.worlds.dangerous.pressurePlates,
+    ]) {
+      if (
+        plate.kind === 'safe' &&
+        persistence.safePlatesPressedIds.includes(plate.id)
+      ) {
+        plate.touched = true;
+      }
+    }
+  }
 }

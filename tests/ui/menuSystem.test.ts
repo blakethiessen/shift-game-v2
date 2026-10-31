@@ -286,4 +286,46 @@ describe('MenuSystem', () => {
     );
     expect(menu.isVisible()).toBe(false);
   });
+
+  it('auto-joins room from URL query string, broadcasts lobbySync when Client connects to Host, and disconnects when switching Lobby tabs', () => {
+    let capturedStateHandler: ((state: any, error?: string) => void) | null = null;
+    peer.onStateChange = vi.fn((h) => {
+      capturedStateHandler = h;
+    });
+
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: peer,
+      initialUrlSearch: '?room=JOIN9',
+    });
+
+    // URL ?room=JOIN9 should automatically trigger peer.joinRoom('JOIN9')
+    expect(peer.joinRoom).toHaveBeenCalledWith('JOIN9');
+
+    // Switch to Host tab -> disconnects previous Join session and starts hosting
+    const hostTabBtn = container.querySelector('[data-testid="lobby-tab-host"]') as HTMLButtonElement;
+    hostTabBtn.click();
+    expect(peer.disconnect).toHaveBeenCalled();
+    expect(peer.hostRoom).toHaveBeenCalled();
+
+    // Host configures settings while waiting for Client
+    const visToggle = container.querySelector('[data-testid="toggle-partner-visibility"]') as HTMLButtonElement;
+    visToggle.click();
+    vi.mocked(peer.sendPacket).mockClear();
+
+    // Client connects -> Host must immediately broadcast its current lobbyConfig via lobbySync!
+    expect(capturedStateHandler).toBeTruthy();
+    capturedStateHandler!('connected');
+    expect(peer.sendPacket).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'lobbySync',
+        lobbyConfig: expect.objectContaining({
+          partnerVisibility: 'echo',
+        }),
+        startGame: false,
+      })
+    );
+  });
 });

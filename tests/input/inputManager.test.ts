@@ -162,6 +162,12 @@ describe('InputManager', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Quote' }));
       expect(input.getPlayerInput(2).up).toBe(true);
       expect(input.getPlayerInput(2).useItemSeq).toBe(2);
+
+      // Pressing ShiftLeft in Online Mode only increments the local player's shiftRequestSeq!
+      input.setPlayMode('online', 1);
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'ShiftLeft' }));
+      expect(input.getPlayerInput(1).shiftRequestSeq).toBe(1);
+      expect(input.getPlayerInput(2).shiftRequestSeq).toBe(0);
     });
   });
 

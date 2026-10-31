@@ -84,6 +84,9 @@ export class MenuSystem {
         this.connectionError = err ?? null;
         this.roomCode = this.peerManager?.getRoomCode() ?? this.roomCode;
         this.rttMs = this.peerManager?.getRttMs() ?? this.rttMs;
+        if (state === 'connected' && this.lobbyTab === 'host') {
+          this.broadcastLobbySync(false);
+        }
         if (this.currentScreen === 'lobby') {
           this.render();
         }
@@ -152,6 +155,13 @@ export class MenuSystem {
             this.render();
           }
         });
+      } else if (
+        this.lobbyTab === 'join' &&
+        this.peerManager &&
+        this.connectionState === 'disconnected' &&
+        this.joinCodeInput.trim().length >= 3
+      ) {
+        void this.peerManager.joinRoom(this.joinCodeInput.trim());
       }
     } else if (screen === 'tutorial') {
       this.lobbyConfig.mode = 'local';
@@ -468,6 +478,9 @@ export class MenuSystem {
     hostTabBtn.textContent = 'HOST ROOM';
     hostTabBtn.addEventListener('click', () => {
       this.audioManager.playSound('menuSelect');
+      if (this.lobbyTab !== 'host') {
+        this.peerManager?.disconnect();
+      }
       this.lobbyTab = 'host';
       if (this.peerManager) {
         void this.peerManager.hostRoom().then((code) => {
@@ -487,6 +500,10 @@ export class MenuSystem {
     joinTabBtn.textContent = 'JOIN ROOM';
     joinTabBtn.addEventListener('click', () => {
       this.audioManager.playSound('menuSelect');
+      if (this.lobbyTab !== 'join') {
+        this.peerManager?.disconnect();
+        this.roomCode = null;
+      }
       this.lobbyTab = 'join';
       this.render();
     });

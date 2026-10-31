@@ -9,7 +9,6 @@ import { PeerManager } from './net/peerManager';
 import { EventDeduplicator, InputSequenceTracker } from './net/protocol';
 import { GameRenderer } from './renderer/gameRenderer';
 import {
-  DimensionSide,
   GameEvent,
   GameState,
   IAudioManager,
@@ -21,7 +20,6 @@ import {
   PlayMode,
   SIMULATION_TICK_MS,
   createDefaultLobbyConfig,
-  getSideForWorld,
 } from './shared/types';
 import { MenuSystem } from './ui/menuSystem';
 
@@ -165,12 +163,16 @@ export class ShiftGameApp {
     return this.running;
   }
 
-  public startLocalGame(config: LobbyConfig): void {
+  public startLocalGame(config: Partial<LobbyConfig> = {}): void {
     void this.audioManager.init();
     this.mode = 'local';
     this.isOnlineHost = true;
     this.localPlayerId = 1;
-    this.lobbyConfig = { ...config, mode: 'local' };
+    this.lobbyConfig = {
+      ...createDefaultLobbyConfig(),
+      ...config,
+      mode: 'local',
+    };
 
     this.eventDeduplicator.reset();
     this.clientInputTracker.reset();
@@ -222,6 +224,9 @@ export class ShiftGameApp {
     this.running = false;
     this.inputManager.setEnabled(false);
     this.audioManager.stopAll();
+    if (this.mode === 'online') {
+      this.peerManager.disconnect();
+    }
     this.renderer.resizeForMode('local');
     this.menuSystem.showScreen('start');
   }
@@ -241,7 +246,7 @@ export class ShiftGameApp {
       this.engine.setState(packet.state);
       const state = this.engine.getState();
       const newEvents = this.eventDeduplicator.extractFromState(state);
-      this.processGameEvents(newEvents, state);
+      this.processGameEvents(newEvents);
       this.audioManager.updateAmbientAndLoops(
         state,
         this.localPlayerId,
@@ -251,24 +256,11 @@ export class ShiftGameApp {
     }
   }
 
-  private processGameEvents(events: GameEvent[], state: GameState): void {
-    const localSide: DimensionSide =
-      this.localPlayerId === 1 ? 'left' : 'right';
-
+  private processGameEvents(events: GameEvent[]): void {
+    // Note: 'playSound' GameEvents are handled directly by audioManager.updateAmbientAndLoops()
+    // with internal eventId deduplication and cross-dimension low-pass filtering.
     for (const ev of events) {
-      if (ev.type === 'playSound' && ev.sound) {
-        const eventSide: DimensionSide | undefined =
-          ev.side ??
-          (ev.playerId ? (ev.playerId === 1 ? 'left' : 'right') : undefined) ??
-          (ev.world ? getSideForWorld(ev.world, state.evilOnLeft) : undefined);
-
-        this.audioManager.playSound(ev.sound, {
-          side: eventSide,
-          localSide,
-          mode: this.mode,
-          muffleCrossDimension: this.lobbyConfig.muffledCrossDimensionAudio,
-        });
-      } else if (ev.type === 'flashScreen' && ev.color) {
+      if (ev.type === 'flashScreen' && ev.color) {
         this.renderer.triggerFlash(ev.color, ev.durationMs, ev.maxOpacity);
       }
     }
@@ -308,7 +300,7 @@ export class ShiftGameApp {
         const p2Input = this.inputManager.getPlayerInput(2);
         const state = this.engine.tick(SIMULATION_TICK_MS, p1Input, p2Input);
         const newEvents = this.eventDeduplicator.extractFromState(state);
-        this.processGameEvents(newEvents, state);
+        this.processGameEvents(newEvents);
         this.audioManager.updateAmbientAndLoops(
           state,
           this.localPlayerId,
@@ -324,7 +316,7 @@ export class ShiftGameApp {
         const state = this.engine.tick(SIMULATION_TICK_MS, p1Input, p2Input);
 
         const newEvents = this.eventDeduplicator.extractFromState(state);
-        this.processGameEvents(newEvents, state);
+        this.processGameEvents(newEvents);
         this.audioManager.updateAmbientAndLoops(
           state,
           this.localPlayerId,

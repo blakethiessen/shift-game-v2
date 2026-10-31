@@ -56,6 +56,31 @@ body {
   background: radial-gradient(circle at center, #0e1417 0%, #000000 80%);
 }
 
+#game-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1000px;
+  min-height: 650px;
+}
+
+#game-canvas {
+  display: block;
+  image-rendering: pixelated;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.95);
+}
+
+#ui-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 20;
+}
+
 .shift-menu-overlay {
   position: relative;
   width: 1000px;
@@ -70,6 +95,7 @@ body {
   justify-content: flex-start;
   border: 2px solid #1e292d;
   box-shadow: 0 0 40px rgba(0, 0, 0, 0.95);
+  pointer-events: auto;
 }
 
 .shift-menu-overlay.is-hidden {

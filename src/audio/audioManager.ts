@@ -125,6 +125,7 @@ export interface ActiveSfxChannel {
   effectiveGain: number;
   startedAt: number;
   stop: () => void;
+  updateGain?: () => void;
 }
 
 export interface ActiveLoopState {
@@ -294,6 +295,17 @@ export class AudioManager implements IAudioManager {
       effectiveGain,
       startedAt: Date.now(),
       stop: cleanup,
+      updateGain: () => {
+        const newBaseGain = channel.muffled
+          ? CROSS_DIM_GAIN_FACTOR * this.sfxVolume
+          : this.sfxVolume;
+        const newEffective = this.muted ? 0 : newBaseGain;
+        channel.gain = newBaseGain;
+        channel.effectiveGain = newEffective;
+        if (gainNode) {
+          gainNode.gain.value = newEffective;
+        }
+      },
     };
 
     this.activeChannels.push(channel);
@@ -568,9 +580,13 @@ export class AudioManager implements IAudioManager {
       this.setLoopState('blobbyTracking', 'blobbyTracking', false, false, 1.0, 0);
       if (state.phase === 'gameOver' || state.phase === 'victory') {
         this.stopMusic();
+      } else if (state.isPaused) {
+        this.currentMusicUpdateGain?.(0);
       }
       return;
     }
+
+    this.currentMusicUpdateGain?.(this.musicVolume);
 
     // 1. Independent Footstep Loops (walk_p1 & walk_p2)
     const p1 = state.players[0];
@@ -720,6 +736,9 @@ export class AudioManager implements IAudioManager {
 
   public setSFXVolume(volume: number): void {
     this.sfxVolume = Math.max(0, Math.min(1, volume));
+    for (const ch of this.activeChannels) {
+      ch.updateGain?.();
+    }
     for (const loop of Object.values(this.activeLoops)) {
       if (loop && loop.active) {
         const baseGain = loop.muffled
@@ -746,6 +765,9 @@ export class AudioManager implements IAudioManager {
   public toggleMute(): boolean {
     this.muted = !this.muted;
     this.currentMusicUpdateGain?.(this.musicVolume);
+    for (const ch of this.activeChannels) {
+      ch.updateGain?.();
+    }
     for (const loop of Object.values(this.activeLoops)) {
       if (loop && loop.active) {
         loop.updateParams(loop.muffled, loop.playbackRate, loop.gain);

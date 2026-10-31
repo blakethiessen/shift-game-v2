@@ -379,8 +379,16 @@ export class InputManager implements IInputManager {
 
     // Common keys
     if (this.matchesBinding(code, this.settings.common.SwitchDimensions)) {
-      this.p1Input.shiftRequestSeq++;
-      this.p2Input.shiftRequestSeq++;
+      if (this.mode === 'online') {
+        if (this.localPlayerId === 1) {
+          this.p1Input.shiftRequestSeq++;
+        } else {
+          this.p2Input.shiftRequestSeq++;
+        }
+      } else {
+        this.p1Input.shiftRequestSeq++;
+        this.p2Input.shiftRequestSeq++;
+      }
     }
     if (this.matchesBinding(code, this.settings.common.Pause)) {
       this.pauseListeners.forEach((cb) => cb());

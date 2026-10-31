@@ -317,6 +317,8 @@ export class GameEngine implements IGameEngine {
 
   private executeDimensionShift(): void {
     this.state.evilOnLeft = !this.state.evilOnLeft;
+    this.state.currentlyShifting = true;
+    this.state.shiftTimerMs = 250;
     this.state.shiftRequest = {
       requestedBy: null,
       remainingMs: 0,
@@ -398,6 +400,13 @@ export class GameEngine implements IGameEngine {
     if (p1Requested) this.lastP1ShiftSeq = p1Input.shiftRequestSeq;
     if (p2Requested) this.lastP2ShiftSeq = p2Input.shiftRequestSeq;
 
+    if (this.state.shiftTimerMs > 0) {
+      this.state.shiftTimerMs = Math.max(0, this.state.shiftTimerMs - dtMs);
+      if (this.state.shiftTimerMs <= 0) {
+        this.state.currentlyShifting = false;
+      }
+    }
+
     if (this.state.shiftCooldownMs > 0) {
       this.state.shiftCooldownMs = Math.max(
         0,
@@ -419,12 +428,17 @@ export class GameEngine implements IGameEngine {
 
     // Cooperative Shift Mode
     if (p1Requested && p2Requested) {
-      // Simultaneous shift (e.g. Local Co-op shared Shift key)
-      this.executeDimensionShift();
+      if (!this.state.currentlyShifting && this.state.shiftCooldownMs <= 0) {
+        // Simultaneous shift (e.g. Local Co-op shared Shift key)
+        this.executeDimensionShift();
+      }
       return;
     }
 
     if (p1Requested || p2Requested) {
+      if (this.state.currentlyShifting) {
+        return;
+      }
       const requester: PlayerId = p1Requested ? 1 : 2;
       if (
         this.state.shiftRequest.requestedBy !== null &&

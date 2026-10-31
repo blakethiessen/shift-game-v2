@@ -670,6 +670,21 @@ export interface IAudioManager {
   stopAll(): void;
 }
 
+export interface DirectionalState {
+  up: boolean;
+  down: boolean;
+  left: boolean;
+  right: boolean;
+}
+
+export type VirtualAction =
+  | 'useItem'
+  | 'interact'
+  | 'inventoryTap'
+  | 'inventoryDrop'
+  | 'shift'
+  | 'ping';
+
 export interface IInputManager {
   getPlayerInput(playerId: PlayerId): PlayerInput;
   getSettings(): ControlSettings;
@@ -679,6 +694,12 @@ export interface IInputManager {
     code: string
   ): void;
   formatKeyLabel(code: string): string;
+  setVirtualDirection?(playerId: PlayerId, dir: Partial<DirectionalState>): void;
+  triggerVirtualAction?(playerId: PlayerId, action: VirtualAction): void;
+  startVirtualInventoryPress?(playerId: PlayerId): void;
+  endVirtualInventoryPress?(playerId: PlayerId): void;
+  triggerPause?(): void;
+  triggerMute?(): void;
   destroy(): void;
 }
 

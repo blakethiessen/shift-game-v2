@@ -901,14 +901,17 @@ export class GameRenderer implements IGameRenderer {
     state: GameState,
     options: RenderOptions
   ): void {
-    const centerX = this.canvas.width / 2;
     const shiftKeyLabel =
       options.keyStrings?.common.SwitchDimensions ?? 'SHIFT';
 
-    // 1. Cooperative Shift Banner + Countdown Bar + Wall Collision Hazard Warning
-    if (state.shiftRequest.requestedBy !== null) {
+    const drawShiftBannerAt = (
+      centerX: number,
+      viewportWidth: number,
+      viewerPlayerId: PlayerId
+    ) => {
+      if (state.shiftRequest.requestedBy === null) return;
       const isRequestedByPartner =
-        state.shiftRequest.requestedBy !== options.localPlayerId;
+        state.shiftRequest.requestedBy !== viewerPlayerId;
       const promptText = isRequestedByPartner
         ? `PARTNER REQUESTS SHIFT — PRESS [${shiftKeyLabel}] TO CONFIRM`
         : 'WAITING FOR PARTNER TO CONFIRM SHIFT...';
@@ -916,7 +919,7 @@ export class GameRenderer implements IGameRenderer {
         state.shiftRequest.willHitWallForP1 ||
         state.shiftRequest.willHitWallForP2;
 
-      const bannerW = Math.min(this.canvas.width - 20, 460);
+      const bannerW = Math.min(viewportWidth - 20, 460);
       const bannerH = hasWallHazard ? 54 : 36;
       const bx = centerX - bannerW / 2;
       const by = 10;
@@ -943,7 +946,6 @@ export class GameRenderer implements IGameRenderer {
         );
       }
 
-      // Countdown bar
       const ratio = Math.max(
         0,
         Math.min(1, state.shiftRequest.remainingMs / 3000)
@@ -956,15 +958,9 @@ export class GameRenderer implements IGameRenderer {
         4
       );
       this.ctx.restore();
-    }
+    };
 
-    // 2. Partner Waiting at Door Indicator
-    const partnerPlayer: PlayerState =
-      state.players[0].id === options.localPlayerId
-        ? state.players[1]
-        : state.players[0];
-
-    if (partnerPlayer.atDoorId !== null) {
+    const drawDoorWaitingAt = (centerX: number) => {
       this.ctx.save();
       this.ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
       const badgeW = 240;
@@ -984,6 +980,40 @@ export class GameRenderer implements IGameRenderer {
         by + badgeH / 2
       );
       this.ctx.restore();
+    };
+
+    if (options.mode === 'local') {
+      const leftPlayer =
+        state.players[0].side === 'left' ? state.players[0] : state.players[1];
+      const rightPlayer =
+        state.players[1].side === 'right' ? state.players[1] : state.players[0];
+
+      if (state.shiftRequest.requestedBy !== null) {
+        drawShiftBannerAt(DIM_WIDTH_PX / 2, DIM_WIDTH_PX, leftPlayer.id);
+        drawShiftBannerAt(
+          DIM_WIDTH_PX + DIM_WIDTH_PX / 2,
+          DIM_WIDTH_PX,
+          rightPlayer.id
+        );
+      }
+      if (rightPlayer.atDoorId !== null) {
+        drawDoorWaitingAt(DIM_WIDTH_PX / 2);
+      }
+      if (leftPlayer.atDoorId !== null) {
+        drawDoorWaitingAt(DIM_WIDTH_PX + DIM_WIDTH_PX / 2);
+      }
+    } else {
+      const centerX = this.canvas.width / 2;
+      if (state.shiftRequest.requestedBy !== null) {
+        drawShiftBannerAt(centerX, this.canvas.width, options.localPlayerId);
+      }
+      const partnerPlayer: PlayerState =
+        state.players[0].id === options.localPlayerId
+          ? state.players[1]
+          : state.players[0];
+      if (partnerPlayer.atDoorId !== null) {
+        drawDoorWaitingAt(centerX);
+      }
     }
   }
 

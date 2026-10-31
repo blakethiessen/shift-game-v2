@@ -242,4 +242,42 @@ describe('ShiftGameApp End-to-End Integration', () => {
 
     app.destroy();
   });
+
+  it('supports Mobile Controls in both Local Co-op (head-to-head opposite ends) and Online P2P Co-op', async () => {
+    const container = document.createElement('div');
+    const canvas = createMockCanvas();
+    container.appendChild(canvas);
+    document.body.appendChild(container);
+
+    const app = new ShiftGameApp({
+      container,
+      canvas,
+      canvasFactory: () => createMockCanvas(),
+      autoStartLoop: false,
+      mobileControlsEnabled: true,
+    });
+
+    app.startLocalGame({
+      mode: 'local',
+      partnerVisibility: 'strict',
+      shiftMode: 'cooperative',
+      muffledCrossDimensionAudio: true,
+    });
+
+    // Verify head-to-head stations are rendered in the UI container
+    const station1 = container.querySelector('[data-testid="mobile-station-p1"]') as HTMLElement;
+    const station2 = container.querySelector('[data-testid="mobile-station-p2"]') as HTMLElement;
+    expect(station1).toBeTruthy();
+    expect(station2).toBeTruthy();
+
+    // Right-thumb Shift button on P2 station shifts dimensions in Local Co-op
+    const shiftBtnP2 = container.querySelector('[data-testid="mobile-btn-shift-p2"]') as HTMLButtonElement;
+    expect(shiftBtnP2).toBeTruthy();
+    expect(app.getState().evilOnLeft).toBe(false);
+    shiftBtnP2.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    app.stepFrame(SIMULATION_TICK_MS);
+    expect(app.getState().evilOnLeft).toBe(true);
+
+    app.destroy();
+  });
 });

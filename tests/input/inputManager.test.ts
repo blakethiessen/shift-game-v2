@@ -211,4 +211,76 @@ describe('InputManager', () => {
       expect(input.getPlayerInput(1).inventoryDropSeq).toBe(0);
     });
   });
+
+  describe('Virtual / Mobile Touch Input API', () => {
+    it('supports independent P1 and P2 virtual movement and discrete actions in Local Mode', () => {
+      input.setPlayMode('local', 1);
+
+      input.setVirtualDirection(1, { up: true, right: true });
+      input.setVirtualDirection(2, { down: true, left: true });
+
+      expect(input.getPlayerInput(1)).toMatchObject({
+        up: true,
+        right: true,
+        down: false,
+        left: false,
+      });
+      expect(input.getPlayerInput(2)).toMatchObject({
+        up: false,
+        right: false,
+        down: true,
+        left: true,
+      });
+
+      input.triggerVirtualAction(1, 'interact');
+      input.triggerVirtualAction(1, 'useItem');
+      input.triggerVirtualAction(2, 'ping');
+      input.triggerVirtualAction(2, 'shift');
+
+      const p1 = input.getPlayerInput(1);
+      const p2 = input.getPlayerInput(2);
+      expect(p1.interactSeq).toBe(1);
+      expect(p1.useItemSeq).toBe(1);
+      expect(p2.pingSeq).toBe(1);
+      expect(p2.pingKind).toBe('here');
+      // In Local Mode, either player tapping Shift triggers a dimension shift
+      expect(p1.shiftRequestSeq).toBe(1);
+      expect(p2.shiftRequestSeq).toBe(1);
+    });
+
+    it('supports virtual inventory tap (<1000ms cycle) and hold (>=1000ms drop)', () => {
+      input.setPlayMode('local', 1);
+
+      // Tap < 1000ms -> cycle
+      input.startVirtualInventoryPress(1);
+      vi.advanceTimersByTime(300);
+      input.endVirtualInventoryPress(1);
+      expect(input.getPlayerInput(1).inventoryCycleSeq).toBe(1);
+      expect(input.getPlayerInput(1).inventoryDropSeq).toBe(0);
+
+      // Hold >= 1000ms -> drop
+      input.startVirtualInventoryPress(2);
+      vi.advanceTimersByTime(1000);
+      expect(input.getPlayerInput(2).inventoryDropSeq).toBe(1);
+      expect(input.getPlayerInput(2).inventoryCycleSeq).toBe(0);
+
+      input.endVirtualInventoryPress(2);
+      expect(input.getPlayerInput(2).inventoryCycleSeq).toBe(0);
+    });
+
+    it('routes virtual input to localPlayerId in Online Mode and only increments local shiftRequestSeq', () => {
+      input.setPlayMode('online', 2);
+
+      input.setVirtualDirection(2, { up: true, left: true });
+      input.triggerVirtualAction(2, 'interact');
+      input.triggerVirtualAction(2, 'shift');
+
+      const p2 = input.getPlayerInput(2);
+      expect(p2.up).toBe(true);
+      expect(p2.left).toBe(true);
+      expect(p2.interactSeq).toBe(1);
+      expect(p2.shiftRequestSeq).toBe(1);
+      expect(input.getPlayerInput(1).shiftRequestSeq).toBe(0);
+    });
+  });
 });

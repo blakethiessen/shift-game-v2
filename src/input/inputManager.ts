@@ -1,12 +1,14 @@
 import {
   CommonKeyBindings,
   ControlSettings,
+  DirectionalState,
   IInputManager,
   PingKind,
   PlayerId,
   PlayerInput,
   PlayerKeyBindings,
   PlayMode,
+  VirtualAction,
   createDefaultPlayerInput,
 } from '../shared/types';
 
@@ -126,6 +128,11 @@ export class InputManager implements IInputManager {
   private p2Input: PlayerInput = createDefaultPlayerInput();
 
   private pressedCodes = new Set<string>();
+
+  private virtualDirs: Record<PlayerId, DirectionalState> = {
+    1: { up: false, down: false, left: false, right: false },
+    2: { up: false, down: false, left: false, right: false },
+  };
 
   private invHold: Record<PlayerId, InventoryHoldTracker> = {
     1: { activeCode: null, timerId: null, droppedOnHold: false },
@@ -271,15 +278,15 @@ export class InputManager implements IInputManager {
       return this.pressedCodes.has(bound);
     };
 
-    const p1Up = checkDown(this.settings.p1.Up);
-    const p1Down = checkDown(this.settings.p1.Down);
-    const p1Left = checkDown(this.settings.p1.Left);
-    const p1Right = checkDown(this.settings.p1.Right);
+    const p1Up = checkDown(this.settings.p1.Up) || this.virtualDirs[1].up;
+    const p1Down = checkDown(this.settings.p1.Down) || this.virtualDirs[1].down;
+    const p1Left = checkDown(this.settings.p1.Left) || this.virtualDirs[1].left;
+    const p1Right = checkDown(this.settings.p1.Right) || this.virtualDirs[1].right;
 
-    const p2Up = checkDown(this.settings.p2.Up);
-    const p2Down = checkDown(this.settings.p2.Down);
-    const p2Left = checkDown(this.settings.p2.Left);
-    const p2Right = checkDown(this.settings.p2.Right);
+    const p2Up = checkDown(this.settings.p2.Up) || this.virtualDirs[2].up;
+    const p2Down = checkDown(this.settings.p2.Down) || this.virtualDirs[2].down;
+    const p2Left = checkDown(this.settings.p2.Left) || this.virtualDirs[2].left;
+    const p2Right = checkDown(this.settings.p2.Right) || this.virtualDirs[2].right;
 
     if (this.mode === 'online') {
       // In Online Mode, allow the local player (whether P1 Host or P2 Client)
@@ -468,6 +475,8 @@ export class InputManager implements IInputManager {
 
   private clearHeldState(): void {
     this.pressedCodes.clear();
+    this.virtualDirs[1] = { up: false, down: false, left: false, right: false };
+    this.virtualDirs[2] = { up: false, down: false, left: false, right: false };
     this.recomputeDirectionalHoldStates();
     for (const pid of [1, 2] as PlayerId[]) {
       const tracker = this.invHold[pid];
@@ -478,6 +487,87 @@ export class InputManager implements IInputManager {
       tracker.activeCode = null;
       tracker.droppedOnHold = false;
     }
+  }
+
+  public setVirtualDirection(
+    playerId: PlayerId,
+    dir: Partial<DirectionalState>
+  ): void {
+    if (!this.enabled) return;
+    this.virtualDirs[playerId] = {
+      ...this.virtualDirs[playerId],
+      ...dir,
+    };
+    this.recomputeDirectionalHoldStates();
+  }
+
+  public triggerVirtualAction(playerId: PlayerId, action: VirtualAction): void {
+    if (!this.enabled) return;
+
+    if (action === 'shift') {
+      if (this.mode === 'online') {
+        if (this.localPlayerId === 1) {
+          this.p1Input.shiftRequestSeq++;
+        } else {
+          this.p2Input.shiftRequestSeq++;
+        }
+      } else {
+        this.p1Input.shiftRequestSeq++;
+        this.p2Input.shiftRequestSeq++;
+      }
+      return;
+    }
+
+    const targets: PlayerInput[] =
+      this.mode === 'online'
+        ? [this.p1Input, this.p2Input]
+        : [playerId === 1 ? this.p1Input : this.p2Input];
+
+    for (const targetInput of targets) {
+      if (action === 'useItem') {
+        targetInput.useItemSeq++;
+      } else if (action === 'interact') {
+        targetInput.interactSeq++;
+      } else if (action === 'inventoryTap') {
+        targetInput.inventoryCycleSeq++;
+      } else if (action === 'inventoryDrop') {
+        targetInput.inventoryDropSeq++;
+      } else if (action === 'ping') {
+        targetInput.pingSeq++;
+        const kinds: PingKind[] = ['here', 'action', 'wait'];
+        targetInput.pingKind = kinds[(targetInput.pingSeq - 1) % kinds.length];
+      }
+    }
+  }
+
+  public startVirtualInventoryPress(playerId: PlayerId): void {
+    if (!this.enabled) return;
+    if (this.mode === 'online') {
+      this.startInventoryHold(1, 'VirtualInventory');
+      this.startInventoryHold(2, 'VirtualInventory');
+    } else {
+      this.startInventoryHold(playerId, 'VirtualInventory');
+    }
+  }
+
+  public endVirtualInventoryPress(playerId: PlayerId): void {
+    if (!this.enabled) return;
+    if (this.mode === 'online') {
+      this.endInventoryHold(1);
+      this.endInventoryHold(2);
+    } else {
+      this.endInventoryHold(playerId);
+    }
+  }
+
+  public triggerPause(): void {
+    if (!this.enabled) return;
+    this.pauseListeners.forEach((cb) => cb());
+  }
+
+  public triggerMute(): void {
+    if (!this.enabled) return;
+    this.muteListeners.forEach((cb) => cb());
   }
 
   public getPlayerInput(playerId: PlayerId): PlayerInput {

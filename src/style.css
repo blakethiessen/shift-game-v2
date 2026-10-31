@@ -496,3 +496,456 @@ input[type="range"].retro-slider::-moz-range-thumb {
   align-items: center;
   justify-content: center;
 }
+
+/* ============================================================================
+   Mobile Touch Controls & Head-to-Head Local Co-op Layout
+   ============================================================================ */
+
+.shift-mobile-controls {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  z-index: 30;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
+}
+
+.shift-mobile-controls.is-hidden {
+  display: none !important;
+}
+
+/* Local Mode: Head-to-head split screen along the phone's long axis */
+.shift-mobile-controls.mobile-mode-local {
+  display: flex;
+  background-color: #000000;
+  pointer-events: auto;
+  overflow: hidden;
+}
+
+.shift-mobile-controls.mobile-mode-local[data-split-axis="horizontal"] {
+  flex-direction: row;
+}
+
+.shift-mobile-controls.mobile-mode-local[data-split-axis="vertical"] {
+  flex-direction: column;
+}
+
+#game-stage:has(.shift-mobile-controls.mobile-mode-local:not(.is-hidden)) #game-canvas {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mobile-station-slot {
+  position: relative;
+  flex: 1 1 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: radial-gradient(circle at center, #0a0f12 0%, #000000 85%);
+}
+
+.shift-mobile-controls.mobile-mode-local .mobile-player-station {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  transform-origin: center center;
+  overflow: hidden;
+}
+
+.mobile-station-viewport {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  pointer-events: none;
+}
+
+.mobile-station-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: 100%;
+  aspect-ratio: 500 / 650;
+  object-fit: contain;
+  image-rendering: pixelated;
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.9);
+}
+
+/* Center Divider between opposite-end players in Local Mode */
+.mobile-center-divider {
+  position: absolute;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.shift-mobile-controls.mobile-mode-local[data-split-axis="horizontal"] .mobile-center-divider {
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  transform: translateX(-50%);
+  flex-direction: column;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(56, 189, 248, 0.55) 20%,
+    rgba(249, 248, 246, 0.75) 50%,
+    rgba(56, 189, 248, 0.55) 80%,
+    transparent 100%
+  );
+}
+
+.shift-mobile-controls.mobile-mode-local[data-split-axis="vertical"] .mobile-center-divider {
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 2px;
+  transform: translateY(-50%);
+  flex-direction: row;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    rgba(56, 189, 248, 0.55) 20%,
+    rgba(249, 248, 246, 0.75) 50%,
+    rgba(56, 189, 248, 0.55) 80%,
+    transparent 100%
+  );
+}
+
+/* Online Mode: Single-dimension viewport + bottom thumb controls */
+.shift-mobile-controls.mobile-mode-online {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: env(safe-area-inset-top, 8px) env(safe-area-inset-right, 8px)
+    env(safe-area-inset-bottom, 8px) env(safe-area-inset-left, 8px);
+}
+
+.mobile-online-util-bar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 12px;
+  pointer-events: auto;
+}
+
+.shift-mobile-controls.mobile-mode-online .mobile-player-station {
+  width: 100%;
+  margin-top: auto;
+}
+
+.mobile-util-btn {
+  pointer-events: auto;
+  background: rgba(12, 18, 22, 0.85);
+  border: 1.5px solid rgba(249, 248, 246, 0.65);
+  color: #f9f8f6;
+  font-family: var(--font-retro);
+  font-size: 12px;
+  letter-spacing: 1px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.mobile-util-btn:active {
+  background: #35494f;
+  color: var(--color-highlight);
+}
+
+/* Controls Row inside each Player Station (Bottom-Left = Joystick, Bottom-Right = Actions/Shift) */
+.mobile-controls-row {
+  position: relative;
+  z-index: 10;
+  margin-top: auto;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 6px 10px 10px;
+  pointer-events: none;
+}
+
+.mobile-thumb-zone {
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Left Thumb: Virtual 8-Way Thumbstick */
+.mobile-joystick-base {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at center,
+    rgba(28, 40, 46, 0.55) 0%,
+    rgba(8, 12, 15, 0.72) 100%
+  );
+  border: 2px solid rgba(249, 248, 246, 0.48);
+  box-shadow: 0 0 14px rgba(0, 0, 0, 0.7), inset 0 0 10px rgba(56, 189, 248, 0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+}
+
+.mobile-joystick-base::before,
+.mobile-joystick-base::after {
+  content: '';
+  position: absolute;
+  background: rgba(249, 248, 246, 0.16);
+  pointer-events: none;
+}
+
+.mobile-joystick-base::before {
+  width: 76%;
+  height: 1px;
+}
+
+.mobile-joystick-base::after {
+  width: 1px;
+  height: 76%;
+}
+
+.mobile-joystick-base.is-active {
+  border-color: rgba(56, 189, 248, 0.9);
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.35), inset 0 0 12px rgba(56, 189, 248, 0.25);
+}
+
+.mobile-joystick-knob {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 35% 35%,
+    rgba(249, 248, 246, 0.92) 0%,
+    rgba(148, 163, 184, 0.85) 60%,
+    rgba(53, 73, 79, 0.95) 100%
+  );
+  border: 2px solid #ffffff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.85);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.mobile-joystick-base.is-active .mobile-joystick-knob {
+  background: radial-gradient(
+    circle at 35% 35%,
+    #ffffff 0%,
+    #38bdf8 65%,
+    #0284c7 100%
+  );
+  border-color: var(--color-highlight);
+}
+
+/* Right Thumb: Ergonomic Action & Shift Cluster */
+.mobile-thumb-zone.thumb-right {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  grid-template-rows: auto auto;
+  gap: 6px;
+  align-items: center;
+  justify-items: center;
+}
+
+.mobile-action-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-retro);
+  color: #ffffff;
+  background: rgba(15, 23, 28, 0.78);
+  border: 2px solid rgba(249, 248, 246, 0.65);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.75);
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  padding: 0;
+  line-height: 1;
+}
+
+.mobile-action-btn.btn-shift {
+  grid-column: 1 / 2;
+  grid-row: 1;
+  width: 54px;
+  height: 38px;
+  border-radius: 10px;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  border-color: #38bdf8;
+  background: rgba(8, 47, 73, 0.82);
+  color: #e0f2fe;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+}
+
+.mobile-action-btn.btn-shift.is-shift-pending {
+  border-color: var(--color-highlight);
+  background: rgba(180, 83, 9, 0.88);
+  color: #ffffff;
+  animation: shift-pulse 0.6s infinite alternate;
+}
+
+@keyframes shift-pulse {
+  from {
+    box-shadow: 0 0 6px rgba(255, 209, 102, 0.4);
+  }
+  to {
+    box-shadow: 0 0 18px rgba(255, 209, 102, 0.95);
+  }
+}
+
+.mobile-action-btn.btn-inv {
+  grid-column: 2 / 3;
+  grid-row: 1;
+  width: 48px;
+  height: 38px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.mobile-action-btn.btn-inv small {
+  font-size: 9px;
+  color: var(--color-muted);
+  margin-top: 1px;
+}
+
+.mobile-action-btn.btn-ping {
+  grid-column: 3 / 4;
+  grid-row: 1;
+  width: 44px;
+  height: 38px;
+  border-radius: 10px;
+  font-size: 12px;
+  border-color: rgba(158, 177, 184, 0.65);
+}
+
+.mobile-action-btn.btn-interact {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  width: 58px;
+  height: 52px;
+  border-radius: 50%;
+  font-size: 17px;
+  border-color: var(--color-highlight);
+  background: rgba(30, 41, 45, 0.85);
+}
+
+.mobile-action-btn.btn-use {
+  grid-column: 2 / 4;
+  grid-row: 2;
+  justify-self: end;
+  width: 58px;
+  height: 52px;
+  border-radius: 50%;
+  font-size: 17px;
+  border-color: #f87171;
+  background: rgba(45, 20, 24, 0.85);
+}
+
+.mobile-action-btn.is-pressed,
+.mobile-action-btn:active {
+  transform: scale(0.93);
+  background: #35494f;
+  border-color: #ffffff;
+  color: var(--color-highlight);
+}
+
+/* ============================================================================
+   Responsive Mobile Viewport Adaptations for Stage & Retro Menus
+   ============================================================================ */
+
+@media (max-width: 1024px), (max-height: 680px) {
+  #game-stage {
+    min-width: 0;
+    min-height: 0;
+    width: 100vw;
+    height: 100dvh;
+  }
+
+  #game-stage:has(.shift-menu-overlay.is-hidden) {
+    min-width: 0;
+  }
+
+  #game-canvas {
+    max-width: 100vw;
+    max-height: 100dvh;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+  }
+
+  .shift-menu-overlay {
+    width: 100vw;
+    height: 100dvh;
+    overflow-y: auto;
+    padding: 8px;
+  }
+
+  .shift-main-logo {
+    margin-top: 16px;
+    margin-bottom: 12px;
+    transform: scale(0.68);
+    transform-origin: center center;
+    flex-shrink: 0;
+  }
+
+  .menu-outer-frame {
+    min-width: min(310px, 92vw);
+    min-height: auto;
+    margin-bottom: 16px;
+  }
+
+  .menu-header-large {
+    font-size: clamp(24px, 5vw, 40px);
+    margin-top: 10px;
+    margin-bottom: 8px;
+  }
+
+  .menu-panel {
+    width: 96vw;
+    max-width: 96vw;
+    padding: 12px;
+    gap: 10px;
+  }
+
+  .lobby-grid,
+  .controls-columns {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .tutorial-card {
+    margin-top: 16px;
+    padding: 16px 18px;
+    font-size: clamp(16px, 3.8vw, 21px);
+    max-width: 94vw;
+    gap: 12px;
+  }
+
+  .sprite-banner-fullscreen {
+    transform: scale(min(calc(100vw / 1000), calc(100dvh / 650)));
+    transform-origin: center center;
+    flex-shrink: 0;
+  }
+}

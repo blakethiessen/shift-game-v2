@@ -27,6 +27,8 @@ export interface MenuCallbacks {
   onStartOnlineGame?: (config: LobbyConfig, isHost: boolean) => void;
   onReturnToTitle?: () => void;
   onLobbyConfigChange?: (config: LobbyConfig) => void;
+  onMobileControlsChange?: (forceEnabled: boolean | null) => void;
+  getMobileControlsForceState?: () => boolean | null;
 }
 
 export interface MenuSystemOptions {
@@ -854,6 +856,29 @@ export class MenuSystem {
     localShiftRow.appendChild(localShiftBtn);
     modeBox.appendChild(localShiftRow);
 
+    const touchRow = document.createElement('div');
+    touchRow.className = 'setting-row';
+    const touchLabel = document.createElement('span');
+    touchLabel.textContent = 'Touch Controls:';
+    const touchBtn = document.createElement('button');
+    touchBtn.type = 'button';
+    touchBtn.className = 'action-btn';
+    touchBtn.setAttribute('data-testid', 'options-touch-controls');
+    const currentForce = this.callbacks.getMobileControlsForceState?.() ?? null;
+    touchBtn.textContent =
+      currentForce === null ? 'Auto' : currentForce ? 'On' : 'Off';
+    touchBtn.addEventListener('click', () => {
+      this.audioManager.playSound('menuSelect');
+      const cur = this.callbacks.getMobileControlsForceState?.() ?? null;
+      const next: boolean | null =
+        cur === null ? true : cur === true ? false : null;
+      this.callbacks.onMobileControlsChange?.(next);
+      this.render();
+    });
+    touchRow.appendChild(touchLabel);
+    touchRow.appendChild(touchBtn);
+    modeBox.appendChild(touchRow);
+
     topGrid.appendChild(modeBox);
     panel.appendChild(topGrid);
 
@@ -974,6 +999,11 @@ export class MenuSystem {
       settings.p2.Ping
     )}" to Ping your partner.`;
     card.appendChild(body2);
+
+    const mobileNote = document.createElement('p');
+    mobileNote.textContent =
+      'Mobile Local Co-op: Hold opposite ends of the phone long ways — Left thumb controls movement, Right thumb controls actions and shifting.';
+    card.appendChild(mobileNote);
 
     const warning = document.createElement('p');
     warning.innerHTML =

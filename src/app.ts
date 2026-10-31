@@ -5,6 +5,7 @@
 import { AudioManager } from './audio/audioManager';
 import { GameEngine } from './core/gameEngine';
 import { InputManager } from './input/inputManager';
+import { MobileControls } from './input/mobileControls';
 import { PeerManager } from './net/peerManager';
 import { EventDeduplicator, InputSequenceTracker } from './net/protocol';
 import { GameRenderer } from './renderer/gameRenderer';
@@ -33,6 +34,7 @@ export interface ShiftGameAppOptions {
   inputTarget?: EventTarget | null;
   autoStartLoop?: boolean;
   seed?: number;
+  mobileControlsEnabled?: boolean | null;
 }
 
 export class ShiftGameApp {
@@ -42,6 +44,7 @@ export class ShiftGameApp {
   private readonly renderer: IGameRenderer;
   private readonly audioManager: IAudioManager;
   private readonly inputManager: InputManager;
+  private readonly mobileControls: MobileControls;
   private readonly peerManager: IPeerManager;
   private readonly menuSystem: MenuSystem;
 
@@ -89,6 +92,13 @@ export class ShiftGameApp {
     });
     this.inputManager.setEnabled(false);
 
+    this.mobileControls = new MobileControls({
+      container: this.container,
+      inputManager: this.inputManager,
+      forceEnabled: options.mobileControlsEnabled ?? null,
+      canvasFactory: options.canvasFactory,
+    });
+
     this.inputManager.onMuteToggle(() => {
       this.audioManager.toggleMute();
     });
@@ -122,6 +132,7 @@ export class ShiftGameApp {
       ) {
         this.running = false;
         this.inputManager.setEnabled(false);
+        this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
         this.audioManager.stopAll();
         this.clientInputTracker.reset();
         this.renderer.resizeForMode('local');
@@ -143,6 +154,11 @@ export class ShiftGameApp {
           this.lobbyConfig = { ...config };
           this.engine.setLobbyConfig(this.lobbyConfig);
         },
+        onMobileControlsChange: (forceEnabled) => {
+          this.mobileControls.setForceEnabled(forceEnabled);
+        },
+        getMobileControlsForceState: () =>
+          this.mobileControls.getForceEnabled(),
       },
     });
 
@@ -167,6 +183,14 @@ export class ShiftGameApp {
 
   public getMenuSystem(): MenuSystem {
     return this.menuSystem;
+  }
+
+  public getMobileControls(): MobileControls {
+    return this.mobileControls;
+  }
+
+  public setMobileControlsEnabled(enabled: boolean | null): void {
+    this.mobileControls.setForceEnabled(enabled);
   }
 
   public getLocalPlayerId(): PlayerId {
@@ -197,6 +221,7 @@ export class ShiftGameApp {
     this.inputManager.setEnabled(true);
     this.renderer.resizeForMode('local');
     this.menuSystem.hide();
+    this.mobileControls.setSessionMode('local', 1, true);
 
     this.running = true;
     this.accumulatorMs = 0;
@@ -227,6 +252,7 @@ export class ShiftGameApp {
     this.inputManager.setEnabled(true);
     this.renderer.resizeForMode('online');
     this.menuSystem.hide();
+    this.mobileControls.setSessionMode('online', this.localPlayerId, true);
 
     this.running = true;
     this.accumulatorMs = 0;
@@ -237,6 +263,7 @@ export class ShiftGameApp {
   public returnToTitle(): void {
     this.running = false;
     this.inputManager.setEnabled(false);
+    this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
     this.audioManager.stopAll();
     if (this.mode === 'online') {
       this.peerManager.disconnect();
@@ -286,12 +313,14 @@ export class ShiftGameApp {
       this.menuSystem.getCurrentScreen() !== 'gameOver'
     ) {
       this.inputManager.setEnabled(false);
+      this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
       this.menuSystem.showScreen('gameOver');
     } else if (
       state.phase === 'victory' &&
       this.menuSystem.getCurrentScreen() !== 'victory'
     ) {
       this.inputManager.setEnabled(false);
+      this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
       this.menuSystem.showScreen('victory');
     }
   }
@@ -375,6 +404,7 @@ export class ShiftGameApp {
       },
       dtMs
     );
+    this.mobileControls.syncFromMainCanvas(this.canvas, state);
   }
 
   private startAnimationFrameLoop(): void {
@@ -405,6 +435,7 @@ export class ShiftGameApp {
         this.boundDebugKeyDown
       );
     }
+    this.mobileControls.destroy();
     this.inputManager.destroy();
     this.menuSystem.destroy();
     this.peerManager.disconnect();

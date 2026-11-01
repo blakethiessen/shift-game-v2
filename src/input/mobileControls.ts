@@ -160,6 +160,8 @@ export interface MobileControlsOptions {
   viewportSizeProvider?: () => { width: number; height: number };
   canvasFactory?: (w: number, h: number) => HTMLCanvasElement;
   storage?: Storage | null;
+  onZoomDelta?: (delta: number) => void;
+  onZoomCycle?: () => void;
 }
 
 export class MobileControls {
@@ -190,6 +192,10 @@ export class MobileControls {
 
   private shiftButtons: HTMLButtonElement[] = [];
   private pauseButtons: HTMLButtonElement[] = [];
+  private zoomCycleButtons: HTMLButtonElement[] = [];
+  private currentZoomDisplay = 1.0;
+  private readonly onZoomDelta?: (delta: number) => void;
+  private readonly onZoomCycle?: () => void;
   private allInteractiveButtons: HTMLButtonElement[] = [];
   private joystickTrackers: ActiveJoystickTracker[] = [];
   private lastPressedJoystick: ActiveJoystickTracker | null = null;
@@ -203,6 +209,8 @@ export class MobileControls {
   constructor(options: MobileControlsOptions) {
     this.container = options.container;
     this.inputManager = options.inputManager;
+    this.onZoomDelta = options.onZoomDelta;
+    this.onZoomCycle = options.onZoomCycle;
     this.storage =
       options.storage !== undefined
         ? options.storage
@@ -331,6 +339,14 @@ export class MobileControls {
 
   public getForceEnabled(): boolean | null {
     return this.forceEnabled;
+  }
+
+  public setZoomDisplay(zoom: number): void {
+    this.currentZoomDisplay = zoom;
+    const label = `${Number(zoom.toFixed(2))}x`;
+    for (const btn of this.zoomCycleButtons) {
+      btn.textContent = label;
+    }
   }
 
   public setSessionMode(
@@ -482,6 +498,7 @@ export class MobileControls {
     this.p2StationCtx = null;
     this.shiftButtons = [];
     this.pauseButtons = [];
+    this.zoomCycleButtons = [];
     this.allInteractiveButtons = [];
     this.joystickTrackers = [];
 
@@ -577,6 +594,43 @@ export class MobileControls {
     const bar = document.createElement('div');
     bar.className = className;
 
+    const zoomOutBtn = document.createElement('button');
+    zoomOutBtn.type = 'button';
+    zoomOutBtn.className = 'mobile-util-btn';
+    zoomOutBtn.setAttribute('data-testid', 'mobile-btn-zoom-out');
+    zoomOutBtn.textContent = '-';
+    zoomOutBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.onZoomDelta?.(-0.25);
+    });
+    this.allInteractiveButtons.push(zoomOutBtn);
+
+    const zoomCycleBtn = document.createElement('button');
+    zoomCycleBtn.type = 'button';
+    zoomCycleBtn.className = 'mobile-util-btn';
+    zoomCycleBtn.setAttribute('data-testid', 'mobile-btn-zoom-cycle');
+    zoomCycleBtn.textContent = `${Number(this.currentZoomDisplay.toFixed(2))}x`;
+    zoomCycleBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.onZoomCycle?.();
+    });
+    this.zoomCycleButtons.push(zoomCycleBtn);
+    this.allInteractiveButtons.push(zoomCycleBtn);
+
+    const zoomInBtn = document.createElement('button');
+    zoomInBtn.type = 'button';
+    zoomInBtn.className = 'mobile-util-btn';
+    zoomInBtn.setAttribute('data-testid', 'mobile-btn-zoom-in');
+    zoomInBtn.textContent = '+';
+    zoomInBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.onZoomDelta?.(0.25);
+    });
+    this.allInteractiveButtons.push(zoomInBtn);
+
     const pauseBtn = document.createElement('button');
     pauseBtn.type = 'button';
     pauseBtn.className = 'mobile-util-btn';
@@ -602,6 +656,9 @@ export class MobileControls {
     });
     this.allInteractiveButtons.push(muteBtn);
 
+    bar.appendChild(zoomOutBtn);
+    bar.appendChild(zoomCycleBtn);
+    bar.appendChild(zoomInBtn);
     bar.appendChild(pauseBtn);
     bar.appendChild(muteBtn);
     return bar;

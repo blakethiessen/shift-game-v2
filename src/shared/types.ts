@@ -632,6 +632,7 @@ export interface RenderOptions {
   mode: PlayMode;
   partnerVisibility: PartnerVisibilityMode;
   lightingEnabled: boolean;
+  cameraZoom?: number;
   keyStrings?: {
     p1: PlayerKeyBindings;
     p2: PlayerKeyBindings;

@@ -8,8 +8,17 @@ import { InputManager } from './input/inputManager';
 import { MobileControls } from './input/mobileControls';
 import { PeerManager } from './net/peerManager';
 import { EventDeduplicator, InputSequenceTracker } from './net/protocol';
-import { GameRenderer } from './renderer/gameRenderer';
 import {
+  CAMERA_ZOOM_PRESETS,
+  CAMERA_ZOOM_STEP,
+  DEFAULT_CAMERA_ZOOM,
+  GameRenderer,
+  MAX_CAMERA_ZOOM,
+  MIN_CAMERA_ZOOM,
+} from './renderer/gameRenderer';
+import {
+  DIM_HEIGHT_TILES,
+  DIM_WIDTH_TILES,
   GameEvent,
   GameState,
   IAudioManager,
@@ -23,6 +32,8 @@ import {
   createDefaultLobbyConfig,
 } from './shared/types';
 import { MenuSystem } from './ui/menuSystem';
+
+export const CAMERA_ZOOM_STORAGE_KEY = 'shift_game_camera_zoom_v1';
 
 export interface ShiftGameAppOptions {
   container: HTMLElement;
@@ -56,9 +67,14 @@ export class ShiftGameApp {
   private localPlayerId: PlayerId = 1;
   private lobbyConfig: LobbyConfig = createDefaultLobbyConfig();
   private lightingEnabled = true;
+  private cameraZoom: number = DEFAULT_CAMERA_ZOOM;
   private running = false;
   private clientTickCounter = 0;
   private lastProcessedClientTick = 0;
+
+  private zoomHudEl: HTMLElement | null = null;
+  private zoomHudSliderEl: HTMLInputElement | null = null;
+  private zoomHudValueEl: HTMLButtonElement | null = null;
 
   private accumulatorMs = 0;
   private lastFrameTimestamp = 0;
@@ -92,12 +108,23 @@ export class ShiftGameApp {
     });
     this.inputManager.setEnabled(false);
 
+    this.cameraZoom = this.loadInitialCameraZoom();
+
     this.mobileControls = new MobileControls({
       container: this.container,
       inputManager: this.inputManager,
       forceEnabled: options.mobileControlsEnabled ?? null,
       canvasFactory: options.canvasFactory,
+      onZoomDelta: (delta) => {
+        this.adjustCameraZoom(delta);
+      },
+      onZoomCycle: () => {
+        this.cycleCameraZoom();
+      },
     });
+    this.mobileControls.setZoomDisplay(this.cameraZoom);
+
+    this.createZoomHud();
 
     this.inputManager.onMuteToggle(() => {
       this.audioManager.toggleMute();
@@ -112,9 +139,31 @@ export class ShiftGameApp {
 
     this.boundDebugKeyDown = (ev: Event) => {
       const e = ev as KeyboardEvent;
-      if (!this.running) return;
-      if (e.code === 'KeyY' && !e.repeat) {
+      if (!this.running || e.repeat || e.ctrlKey || e.metaKey || e.altKey) {
+        return;
+      }
+      const state = this.engine.getState();
+      if (state.phase === 'gameOver' || state.phase === 'victory') {
+        return;
+      }
+      const settings = this.inputManager.getSettings();
+      const isCodeBound =
+        Object.values(settings.p1).includes(e.code) ||
+        Object.values(settings.p2).includes(e.code) ||
+        Object.values(settings.common).includes(e.code);
+      if (isCodeBound) {
+        return;
+      }
+
+      if (e.code === 'KeyY') {
         this.lightingEnabled = !this.lightingEnabled;
+        this.renderCurrentState(0);
+      } else if (e.code === 'Equal' || e.code === 'NumpadAdd') {
+        this.adjustCameraZoom(CAMERA_ZOOM_STEP);
+      } else if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
+        this.adjustCameraZoom(-CAMERA_ZOOM_STEP);
+      } else if (e.code === 'Digit0' || e.code === 'Numpad0') {
+        this.setCameraZoom(DEFAULT_CAMERA_ZOOM);
       }
     };
     if (this.inputEventTarget) {
@@ -132,6 +181,7 @@ export class ShiftGameApp {
         (state === 'disconnected' || state === 'error')
       ) {
         this.running = false;
+        this.updateZoomHudVisibility();
         this.inputManager.setEnabled(false);
         this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
         this.audioManager.stopAll();
@@ -157,9 +207,14 @@ export class ShiftGameApp {
         },
         onMobileControlsChange: (forceEnabled) => {
           this.mobileControls.setForceEnabled(forceEnabled);
+          this.updateZoomHudVisibility();
         },
         getMobileControlsForceState: () =>
           this.mobileControls.getForceEnabled(),
+        onCameraZoomChange: (zoom) => {
+          this.setCameraZoom(zoom);
+        },
+        getCameraZoom: () => this.cameraZoom,
       },
     });
 
@@ -192,6 +247,192 @@ export class ShiftGameApp {
 
   public setMobileControlsEnabled(enabled: boolean | null): void {
     this.mobileControls.setForceEnabled(enabled);
+    this.updateZoomHudVisibility();
+  }
+
+  public getCameraZoom(): number {
+    return this.cameraZoom;
+  }
+
+  public setCameraZoom(zoom: number): void {
+    const safe = Number.isFinite(zoom) ? zoom : DEFAULT_CAMERA_ZOOM;
+    const clamped = Math.max(
+      MIN_CAMERA_ZOOM,
+      Math.min(MAX_CAMERA_ZOOM, Math.round(safe * 100) / 100)
+    );
+    this.cameraZoom = clamped;
+    this.saveCameraZoom(clamped);
+    this.mobileControls.setZoomDisplay(clamped);
+    this.syncZoomHudDisplay();
+    if (this.running) {
+      this.renderCurrentState(0);
+    }
+  }
+
+  public adjustCameraZoom(delta: number): number {
+    this.setCameraZoom(this.cameraZoom + delta);
+    return this.cameraZoom;
+  }
+
+  public cycleCameraZoom(): number {
+    const nextPreset = CAMERA_ZOOM_PRESETS.find(
+      (p) => p > this.cameraZoom + 0.01
+    );
+    const target = nextPreset ?? CAMERA_ZOOM_PRESETS[0];
+    this.setCameraZoom(target);
+    return this.cameraZoom;
+  }
+
+  private loadInitialCameraZoom(): number {
+    const clampZoom = (val: number) =>
+      Math.max(
+        MIN_CAMERA_ZOOM,
+        Math.min(MAX_CAMERA_ZOOM, Math.round(val * 100) / 100)
+      );
+
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const params = new URLSearchParams(window.location.search);
+      const urlZoom = params.get('zoom');
+      if (urlZoom !== null) {
+        const parsed = parseFloat(urlZoom);
+        if (Number.isFinite(parsed)) {
+          return clampZoom(parsed);
+        }
+      }
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const saved = localStorage.getItem(CAMERA_ZOOM_STORAGE_KEY);
+        if (saved !== null) {
+          const parsed = parseFloat(saved);
+          if (Number.isFinite(parsed)) {
+            return clampZoom(parsed);
+          }
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
+    return DEFAULT_CAMERA_ZOOM;
+  }
+
+  private saveCameraZoom(zoom: number): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(CAMERA_ZOOM_STORAGE_KEY, String(zoom));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  private formatZoomReadout(zoom: number): string {
+    const zText = `${Number(zoom.toFixed(2))}x`;
+    const tilesW = Number((DIM_WIDTH_TILES / zoom).toFixed(1));
+    const tilesH = Number((DIM_HEIGHT_TILES / zoom).toFixed(1));
+    return `${zText} (${tilesW}×${tilesH} tiles)`;
+  }
+
+  private createZoomHud(): void {
+    const bar = document.createElement('div');
+    bar.className = 'shift-zoom-hud is-hidden';
+    bar.setAttribute('data-testid', 'shift-zoom-hud');
+
+    const label = document.createElement('span');
+    label.className = 'zoom-hud-label';
+    label.textContent = 'ZOOM';
+
+    const outBtn = document.createElement('button');
+    outBtn.type = 'button';
+    outBtn.className = 'zoom-hud-btn';
+    outBtn.setAttribute('data-testid', 'hud-zoom-out');
+    outBtn.setAttribute('title', 'Zoom Out (-)');
+    outBtn.textContent = '-';
+    outBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    outBtn.addEventListener('click', () => {
+      this.adjustCameraZoom(-CAMERA_ZOOM_STEP);
+      outBtn.blur();
+    });
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'zoom-hud-slider';
+    slider.setAttribute('data-testid', 'hud-zoom-slider');
+    slider.setAttribute('aria-label', 'Viewport Zoom');
+    slider.min = String(MIN_CAMERA_ZOOM);
+    slider.max = String(MAX_CAMERA_ZOOM);
+    slider.step = '0.05';
+    slider.value = String(this.cameraZoom);
+    const onSliderInput = () => {
+      const val = parseFloat(slider.value);
+      if (Number.isFinite(val)) {
+        this.setCameraZoom(val);
+      }
+    };
+    slider.addEventListener('input', onSliderInput);
+    slider.addEventListener('change', () => {
+      onSliderInput();
+      slider.blur();
+    });
+    slider.addEventListener('pointerup', () => slider.blur());
+    slider.addEventListener('mouseup', () => slider.blur());
+    slider.addEventListener('keydown', (e) => {
+      e.preventDefault();
+      slider.blur();
+    });
+
+    const valueBtn = document.createElement('button');
+    valueBtn.type = 'button';
+    valueBtn.className = 'zoom-hud-value';
+    valueBtn.setAttribute('data-testid', 'hud-zoom-value');
+    valueBtn.setAttribute('title', 'Click to cycle preset zoom (0 to reset)');
+    valueBtn.textContent = this.formatZoomReadout(this.cameraZoom);
+    valueBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    valueBtn.addEventListener('click', () => {
+      this.cycleCameraZoom();
+      valueBtn.blur();
+    });
+
+    const inBtn = document.createElement('button');
+    inBtn.type = 'button';
+    inBtn.className = 'zoom-hud-btn';
+    inBtn.setAttribute('data-testid', 'hud-zoom-in');
+    inBtn.setAttribute('title', 'Zoom In (+)');
+    inBtn.textContent = '+';
+    inBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    inBtn.addEventListener('click', () => {
+      this.adjustCameraZoom(CAMERA_ZOOM_STEP);
+      inBtn.blur();
+    });
+
+    bar.appendChild(label);
+    bar.appendChild(outBtn);
+    bar.appendChild(slider);
+    bar.appendChild(valueBtn);
+    bar.appendChild(inBtn);
+
+    this.container.appendChild(bar);
+    this.zoomHudEl = bar;
+    this.zoomHudSliderEl = slider;
+    this.zoomHudValueEl = valueBtn;
+  }
+
+  private syncZoomHudDisplay(): void {
+    if (this.zoomHudSliderEl) {
+      this.zoomHudSliderEl.value = String(this.cameraZoom);
+    }
+    if (this.zoomHudValueEl) {
+      this.zoomHudValueEl.textContent = this.formatZoomReadout(this.cameraZoom);
+    }
+  }
+
+  private updateZoomHudVisibility(): void {
+    if (!this.zoomHudEl) return;
+    const state = this.engine.getState();
+    const inActivePlay =
+      this.running &&
+      state.phase !== 'gameOver' &&
+      state.phase !== 'victory';
+    this.zoomHudEl.classList.toggle('is-hidden', !inActivePlay);
   }
 
   public getLocalPlayerId(): PlayerId {
@@ -226,6 +467,7 @@ export class ShiftGameApp {
 
     this.running = true;
     this.accumulatorMs = 0;
+    this.updateZoomHudVisibility();
     this.audioManager.playSound('doorClosing');
     this.renderCurrentState(0);
   }
@@ -257,12 +499,14 @@ export class ShiftGameApp {
 
     this.running = true;
     this.accumulatorMs = 0;
+    this.updateZoomHudVisibility();
     this.audioManager.playSound('doorClosing');
     this.renderCurrentState(0);
   }
 
   public returnToTitle(): void {
     this.running = false;
+    this.updateZoomHudVisibility();
     this.inputManager.setEnabled(false);
     this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
     this.audioManager.stopAll();
@@ -315,6 +559,7 @@ export class ShiftGameApp {
     ) {
       this.inputManager.setEnabled(false);
       this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
+      this.updateZoomHudVisibility();
       this.menuSystem.showScreen('gameOver');
     } else if (
       state.phase === 'victory' &&
@@ -322,6 +567,7 @@ export class ShiftGameApp {
     ) {
       this.inputManager.setEnabled(false);
       this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
+      this.updateZoomHudVisibility();
       this.menuSystem.showScreen('victory');
     }
   }
@@ -423,6 +669,7 @@ export class ShiftGameApp {
         mode: this.mode,
         partnerVisibility: this.lobbyConfig.partnerVisibility,
         lightingEnabled: this.lightingEnabled,
+        cameraZoom: this.cameraZoom,
         keyStrings,
       },
       dtMs
@@ -458,6 +705,7 @@ export class ShiftGameApp {
         this.boundDebugKeyDown
       );
     }
+    this.zoomHudEl?.remove();
     this.mobileControls.destroy();
     this.inputManager.destroy();
     this.menuSystem.destroy();

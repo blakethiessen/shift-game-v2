@@ -92,7 +92,8 @@ body {
   background-color: #000000;
   color: #ffffff;
   font-family: var(--font-retro);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -200,9 +201,9 @@ body {
 
 /* Headers */
 .menu-header-large {
-  font-size: 46px;
-  margin-top: 28px;
-  margin-bottom: 14px;
+  font-size: 42px;
+  margin-top: 16px;
+  margin-bottom: 10px;
   text-align: center;
   letter-spacing: 2px;
 }
@@ -226,12 +227,12 @@ body {
   outline: 3px solid #35494F;
   outline-offset: -8px;
   background-color: #080b0d;
-  padding: 18px 24px;
+  padding: 14px 22px;
   width: 880px;
   max-width: 92%;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
 .menu-tabs {
@@ -498,6 +499,74 @@ input[type="range"].retro-slider::-moz-range-thumb {
 }
 
 /* ============================================================================
+   In-Game Viewport Zoom Test HUD
+   ============================================================================ */
+
+.shift-zoom-hud {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(8, 12, 16, 0.88);
+  border: 1.5px solid rgba(249, 248, 246, 0.65);
+  border-radius: 6px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.85);
+  pointer-events: auto;
+  user-select: none;
+}
+
+.shift-zoom-hud.is-hidden {
+  display: none !important;
+}
+
+#ui-overlay:has(.shift-mobile-controls:not(.is-hidden)) .shift-zoom-hud {
+  display: none !important;
+}
+
+.zoom-hud-label {
+  font-size: 13px;
+  color: var(--color-muted);
+  letter-spacing: 1px;
+  margin-right: 2px;
+}
+
+.zoom-hud-btn,
+.zoom-hud-value {
+  background: #121a1e;
+  border: 1.5px solid #35494f;
+  color: #ffffff;
+  font-family: var(--font-retro);
+  font-size: 13px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.zoom-hud-btn:hover,
+.zoom-hud-value:hover {
+  border-color: var(--color-highlight);
+  color: var(--color-highlight);
+}
+
+.zoom-hud-value {
+  min-width: 136px;
+  text-align: center;
+  color: var(--color-highlight);
+}
+
+.zoom-hud-slider {
+  width: 90px;
+  accent-color: var(--color-highlight);
+  cursor: pointer;
+}
+
+/* ============================================================================
    Mobile Touch Controls & Head-to-Head Local Co-op Layout
    ============================================================================ */
 
@@ -566,7 +635,7 @@ input[type="range"].retro-slider::-moz-range-thumb {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 4px 4px 24px;
+  padding: 20px 4px 24px;
   pointer-events: none;
 }
 
@@ -666,6 +735,8 @@ input[type="range"].retro-slider::-moz-range-thumb {
   border-radius: 4px;
   cursor: pointer;
   touch-action: none;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .mobile-util-btn:active,

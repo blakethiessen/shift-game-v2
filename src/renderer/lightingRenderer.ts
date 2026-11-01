@@ -319,8 +319,11 @@ export class LightingRenderer {
       this.punchLightCircle(ctx, px, py, LANTERN_LIGHT_RADIUS_PX);
     }
 
-    // 6. Composite onto target canvas at (offsetX, 0)
+    // 6. Composite onto target canvas at (offsetX, 0) with smooth radial interpolation
     targetCtx.save();
+    if ('imageSmoothingEnabled' in targetCtx) {
+      targetCtx.imageSmoothingEnabled = true;
+    }
     targetCtx.globalCompositeOperation = 'source-over';
     targetCtx.globalAlpha = 1;
     targetCtx.drawImage(this.offscreenCanvas, offsetX, 0);

@@ -291,4 +291,76 @@ describe('ShiftGameApp End-to-End Integration', () => {
 
     app.destroy();
   });
+
+  it('supports live Viewport Camera Zoom via HUD controls, keyboard shortcuts, and API while moving around', () => {
+    const container = document.createElement('div');
+    const canvas = createMockCanvas();
+    container.appendChild(canvas);
+    document.body.appendChild(container);
+
+    const inputTarget = new EventTarget();
+    const app = new ShiftGameApp({
+      container,
+      canvas,
+      inputTarget,
+      canvasFactory: () => createMockCanvas(),
+      autoStartLoop: false,
+      mobileControlsEnabled: false,
+    });
+
+    app.startLocalGame();
+    expect(app.getCameraZoom()).toBe(1.0);
+
+    // HUD zoom bar should be visible during gameplay
+    const hudZoomIn = container.querySelector('[data-testid="hud-zoom-in"]') as HTMLButtonElement;
+    const hudZoomOut = container.querySelector('[data-testid="hud-zoom-out"]') as HTMLButtonElement;
+    const hudZoomValue = container.querySelector('[data-testid="hud-zoom-value"]') as HTMLButtonElement;
+    const hudZoomSlider = container.querySelector('[data-testid="hud-zoom-slider"]') as HTMLInputElement;
+    expect(hudZoomIn).toBeTruthy();
+    expect(hudZoomOut).toBeTruthy();
+    expect(hudZoomValue).toBeTruthy();
+    expect(hudZoomSlider).toBeTruthy();
+
+    // Click HUD Zoom In (+) -> 1.25x
+    hudZoomIn.click();
+    expect(app.getCameraZoom()).toBe(1.25);
+    expect(hudZoomValue.textContent).toContain('1.25x');
+
+    // Drag HUD Zoom Slider -> 2.25x
+    hudZoomSlider.value = '2.25';
+    hudZoomSlider.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(app.getCameraZoom()).toBe(2.25);
+    expect(hudZoomValue.textContent).toContain('2.25x');
+
+    // Keyboard shortcut Equal (+) -> 2.5x, Minus (-) -> 2.25x, Digit0 (0) -> reset 1.0x
+    inputTarget.dispatchEvent(new KeyboardEvent('keydown', { code: 'Equal' }));
+    expect(app.getCameraZoom()).toBe(2.5);
+
+    inputTarget.dispatchEvent(new KeyboardEvent('keydown', { code: 'Minus' }));
+    expect(app.getCameraZoom()).toBe(2.25);
+
+    inputTarget.dispatchEvent(new KeyboardEvent('keydown', { code: 'Digit0' }));
+    expect(app.getCameraZoom()).toBe(1.0);
+
+    // Browser modifier shortcuts (Ctrl + Equal) must be ignored by in-game zoom
+    inputTarget.dispatchEvent(
+      new KeyboardEvent('keydown', { code: 'Equal', ctrlKey: true })
+    );
+    expect(app.getCameraZoom()).toBe(1.0);
+
+    // Arrow keys pressed on the HUD zoom slider must be prevented/blurred so P2 Arrow keys aren't hijacked
+    const keydownOnSlider = new KeyboardEvent('keydown', {
+      code: 'ArrowRight',
+      cancelable: true,
+    });
+    hudZoomSlider.dispatchEvent(keydownOnSlider);
+    expect(keydownOnSlider.defaultPrevented).toBe(true);
+
+    // If a player binds an action to Equal, pressing Equal triggers that action and does NOT change zoom
+    app.getMenuSystem()['inputManager'].updateBinding('p2', 'UseItem', 'Equal');
+    inputTarget.dispatchEvent(new KeyboardEvent('keydown', { code: 'Equal' }));
+    expect(app.getCameraZoom()).toBe(1.0);
+
+    app.destroy();
+  });
 });

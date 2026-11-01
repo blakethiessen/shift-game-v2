@@ -16,6 +16,9 @@ import {
   formatPopupText,
   computeFloatingInventoryPosition,
   computeFinalRoomConvergenceAlpha,
+  computeCameraViewport,
+  MIN_CAMERA_ZOOM,
+  MAX_CAMERA_ZOOM,
   GameRenderer,
 } from '../../src/renderer/gameRenderer';
 
@@ -283,6 +286,46 @@ describe('gameRenderer', () => {
       expect(alpha).toBeGreaterThan(0.5);
       expect(alpha).toBeLessThanOrEqual(1);
     });
+
+    it('computes zoomed camera viewport centered on player and clamped to 500x650 room boundaries', () => {
+      // Default 1x zoom shows full 500x650 room
+      const full = computeCameraViewport(225, 300, 1.0);
+      expect(full).toEqual({
+        zoom: 1,
+        viewWidth: 500,
+        viewHeight: 650,
+        camX: 0,
+        camY: 0,
+      });
+
+      // 2x zoom -> 250x325 visible area centered on player center (225 + 12.5 = 237.5, 300 + 12.5 = 312.5)
+      const zoom2x = computeCameraViewport(225, 300, 2.0);
+      expect(zoom2x.zoom).toBe(2);
+      expect(zoom2x.viewWidth).toBe(250);
+      expect(zoom2x.viewHeight).toBe(325);
+      expect(zoom2x.camX).toBeCloseTo(237.5 - 125, 4);
+      expect(zoom2x.camY).toBeCloseTo(312.5 - 162.5, 4);
+
+      // Near top-left corner (0, 0) -> clamps camX=0, camY=0
+      const topLeft = computeCameraViewport(0, 0, 2.0);
+      expect(topLeft.camX).toBe(0);
+      expect(topLeft.camY).toBe(0);
+
+      // Near bottom-right corner (475, 625) -> clamps camX = 500 - 250 = 250, camY = 650 - 325 = 325
+      const bottomRight = computeCameraViewport(475, 625, 2.0);
+      expect(bottomRight.camX).toBe(250);
+      expect(bottomRight.camY).toBe(325);
+
+      // Clamps zoom to [MIN_CAMERA_ZOOM, MAX_CAMERA_ZOOM]
+      expect(computeCameraViewport(200, 200, 0.25).zoom).toBe(MIN_CAMERA_ZOOM);
+      expect(computeCameraViewport(200, 200, 10).zoom).toBe(MAX_CAMERA_ZOOM);
+
+      // Clamps popup box inside zoomed camera viewport so it never clips off zoomed screen
+      const cam = computeCameraViewport(225, 300, 2.0);
+      const popupRight = clampPopupBoxPosition(340, 300, Direction.Right, 120, 60, cam);
+      expect(popupRight.x + 120).toBeLessThanOrEqual(cam.camX + cam.viewWidth);
+      expect(popupRight.x).toBeGreaterThanOrEqual(cam.camX);
+    });
   });
 
   describe('Dual Viewport Modes (Local 1000x650 vs Online 500x650)', () => {
@@ -336,6 +379,98 @@ describe('gameRenderer', () => {
       expect(canvas.height).toBe(650);
       // Should have rendered tiles and both players converging
       expect(ctx.drawImageCalls.length).toBeGreaterThan(0);
+    });
+
+    it('applies per-dimension camera zoom scaling and translation centered on each player when cameraZoom > 1', () => {
+      const { canvas, ctx } = createMockCanvasAndCtx();
+      const offscreenFactory = () => createMockCanvasAndCtx().canvas;
+      const renderer = new GameRenderer(
+        canvas,
+        {} as CanvasImageSource,
+        offscreenFactory
+      );
+
+      const state = createMockGameState({
+        players: [
+          createPlayer(1, { x: 225, y: 300, activePopupText: 'Zoomed popup text' }),
+          createPlayer(2, { x: 400, y: 500 }),
+        ],
+      });
+
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'local',
+          partnerVisibility: 'strict',
+          lightingEnabled: true,
+          cameraZoom: 2.0,
+        },
+        16.67
+      );
+
+      // Both left and right viewports should scale by (2, 2) and translate by (-camX, -camY)
+      expect(ctx.scale).toHaveBeenCalledWith(2, 2);
+      const cam1 = computeCameraViewport(225, 300, 2.0);
+      const cam2 = computeCameraViewport(400, 500, 2.0);
+      expect(ctx.translate).toHaveBeenCalledWith(-cam1.camX, -cam1.camY);
+      expect(ctx.translate).toHaveBeenCalledWith(-cam2.camX, -cam2.camY);
+    });
+
+    it('keeps multi-line book popups and off-camera partner pings unclipped in screen space at 4.0x max zoom', () => {
+      const { canvas, ctx } = createMockCanvasAndCtx();
+      const offscreenFactory = () => createMockCanvasAndCtx().canvas;
+      const renderer = new GameRenderer(
+        canvas,
+        {} as CanvasImageSource,
+        offscreenFactory
+      );
+
+      const longBookText =
+        'Read all the books before leaving the spawn room if you want to live and survive the monsters in the dark dimension.';
+      const state = createMockGameState({
+        players: [
+          createPlayer(1, {
+            x: 10,
+            y: 10,
+            activePopupText: longBookText,
+            popupFaceDirection: Direction.Up,
+          }),
+          createPlayer(2, {
+            x: 450,
+            y: 600,
+            ping: {
+              active: true,
+              x: 450,
+              y: 600,
+              kind: 'action',
+              remainingMs: 2000,
+            },
+          }),
+        ],
+      });
+
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+          cameraZoom: 4.0,
+        },
+        16.67
+      );
+
+      // Off-camera partner ping at (450, 600) while P1 is at (10, 10) at 4x zoom
+      // should be clamped inside the 500x650 viewport with at least 28px margin
+      const actionCall = ctx.fillTextCalls.find((c) => c.text === 'ACTION');
+      expect(actionCall).toBeDefined();
+      expect(actionCall!.x).toBeGreaterThanOrEqual(28);
+      expect(actionCall!.x).toBeLessThanOrEqual(500 - 28);
+      expect(actionCall!.y).toBeGreaterThanOrEqual(14);
+      expect(actionCall!.y).toBeLessThanOrEqual(650 - 14);
+      expect(ctx.setLineDash).toHaveBeenCalledWith([4, 3]);
     });
   });
 

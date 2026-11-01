@@ -327,6 +327,50 @@ describe('MobileControls', () => {
       expect(onMute).toHaveBeenCalledTimes(1);
     });
 
+    it('renders mobile zoom utility buttons and triggers zoom adjustment callbacks', () => {
+      let zoom = 1.0;
+      const onZoomDelta = vi.fn((delta: number) => {
+        zoom = Math.max(1.0, Math.min(4.0, zoom + delta));
+        mobile.setZoomDisplay(zoom);
+      });
+      const onZoomCycle = vi.fn(() => {
+        zoom = zoom >= 2.0 ? 1.0 : zoom + 0.5;
+        mobile.setZoomDisplay(zoom);
+      });
+
+      mobile = new MobileControls({
+        container,
+        inputManager: input,
+        forceEnabled: true,
+        viewportSizeProvider: () => ({ width: 390, height: 844 }),
+        onZoomDelta,
+        onZoomCycle,
+      });
+
+      mobile.setSessionMode('online', 1, true);
+      mobile.setZoomDisplay(1.0);
+
+      const zoomInBtn = container.querySelector('[data-testid="mobile-btn-zoom-in"]') as HTMLButtonElement;
+      const zoomOutBtn = container.querySelector('[data-testid="mobile-btn-zoom-out"]') as HTMLButtonElement;
+      const zoomCycleBtn = container.querySelector('[data-testid="mobile-btn-zoom-cycle"]') as HTMLButtonElement;
+
+      expect(zoomInBtn).toBeTruthy();
+      expect(zoomOutBtn).toBeTruthy();
+      expect(zoomCycleBtn).toBeTruthy();
+      expect(zoomCycleBtn.textContent).toContain('1x');
+
+      zoomInBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      expect(onZoomDelta).toHaveBeenCalledWith(0.25);
+      expect(zoomCycleBtn.textContent).toContain('1.25x');
+
+      zoomOutBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      expect(onZoomDelta).toHaveBeenCalledWith(-0.25);
+      expect(zoomCycleBtn.textContent).toContain('1x');
+
+      zoomCycleBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      expect(onZoomCycle).toHaveBeenCalledTimes(1);
+    });
+
     it('isolates multi-touch pointerIds, prevents second-finger joystick stealing, ignores pointerleave on INV hold, and resets UI on window blur', () => {
       mobile = new MobileControls({
         container,

@@ -29,6 +29,8 @@ export interface MenuCallbacks {
   onLobbyConfigChange?: (config: LobbyConfig) => void;
   onMobileControlsChange?: (forceEnabled: boolean | null) => void;
   getMobileControlsForceState?: () => boolean | null;
+  onCameraZoomChange?: (zoom: number) => void;
+  getCameraZoom?: () => number;
 }
 
 export interface MenuSystemOptions {
@@ -878,6 +880,34 @@ export class MenuSystem {
     touchRow.appendChild(touchLabel);
     touchRow.appendChild(touchBtn);
     modeBox.appendChild(touchRow);
+
+    const zoomRow = document.createElement('div');
+    zoomRow.className = 'slider-row';
+    const currentZoom = this.callbacks.getCameraZoom?.() ?? 1.0;
+    const zoomLabel = document.createElement('label');
+    zoomLabel.htmlFor = 'slider-zoom-input';
+    zoomLabel.textContent = `Zoom (${Number(currentZoom.toFixed(2))}x)`;
+    const zoomInput = document.createElement('input');
+    zoomInput.id = 'slider-zoom-input';
+    zoomInput.type = 'range';
+    zoomInput.className = 'retro-slider';
+    zoomInput.setAttribute('data-testid', 'slider-zoom');
+    zoomInput.min = '1';
+    zoomInput.max = '4';
+    zoomInput.step = '0.05';
+    zoomInput.value = String(currentZoom);
+    const onZoomSliderChange = () => {
+      const val = parseFloat(zoomInput.value);
+      if (Number.isFinite(val)) {
+        this.callbacks.onCameraZoomChange?.(val);
+        zoomLabel.textContent = `Zoom (${Number(val.toFixed(2))}x)`;
+      }
+    };
+    zoomInput.addEventListener('input', onZoomSliderChange);
+    zoomInput.addEventListener('change', onZoomSliderChange);
+    zoomRow.appendChild(zoomLabel);
+    zoomRow.appendChild(zoomInput);
+    modeBox.appendChild(zoomRow);
 
     topGrid.appendChild(modeBox);
     panel.appendChild(topGrid);

@@ -198,6 +198,34 @@ describe('MenuSystem', () => {
     expect(p1InteractBtn.textContent).toContain('F');
   });
 
+  it('renders Viewport Zoom slider in Options Screen and invokes onCameraZoomChange callback', () => {
+    let currentZoom = 1.0;
+    const onCameraZoomChange = vi.fn((z: number) => {
+      currentZoom = z;
+    });
+
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: peer,
+      callbacks: {
+        getCameraZoom: () => currentZoom,
+        onCameraZoomChange,
+      },
+    });
+    menu.showScreen('options');
+
+    const zoomSlider = container.querySelector('[data-testid="slider-zoom"]') as HTMLInputElement;
+    expect(zoomSlider).toBeTruthy();
+    expect(zoomSlider.value).toBe('1');
+
+    zoomSlider.value = '1.75';
+    zoomSlider.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(onCameraZoomChange).toHaveBeenCalledWith(1.75);
+    expect(container.textContent).toContain('1.75x');
+  });
+
   it('renders Tutorial Screen with formatted keybindings from InputManager and starts game on key press', () => {
     const onStartLocal = vi.fn();
     input.updateBinding('p1', 'Interact', 'KeyG');

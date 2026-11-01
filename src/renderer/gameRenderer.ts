@@ -48,16 +48,84 @@ export const POPUP_BOX_WIDTH_PX = 120;
 export const POPUP_DEFAULT_HEIGHT_PX = 64;
 export const POPUP_VIEWPORT_MARGIN_PX = 4;
 
+export const MIN_CAMERA_ZOOM = 1.0;
+export const MAX_CAMERA_ZOOM = 4.0;
+export const DEFAULT_CAMERA_ZOOM = 1.0;
+export const CAMERA_ZOOM_STEP = 0.25;
+export const CAMERA_ZOOM_PRESETS: readonly number[] = [
+  1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+];
+
+export interface CameraViewport {
+  zoom: number;
+  /** Width of visible world area in room pixels (DIM_WIDTH_PX / zoom) */
+  viewWidth: number;
+  /** Height of visible world area in room pixels (DIM_HEIGHT_PX / zoom) */
+  viewHeight: number;
+  /** Top-left world X coordinate of the camera within 0..DIM_WIDTH_PX */
+  camX: number;
+  /** Top-left world Y coordinate of the camera within 0..DIM_HEIGHT_PX */
+  camY: number;
+}
+
+/**
+ * Computes the camera viewport rect in room coordinates (0..500 x 0..650)
+ * centered on the player and clamped to the room edges so no out-of-bounds void is shown.
+ */
+export function computeCameraViewport(
+  playerX: number,
+  playerY: number,
+  rawZoom: number = DEFAULT_CAMERA_ZOOM
+): CameraViewport {
+  const safeZoom =
+    typeof rawZoom === 'number' && Number.isFinite(rawZoom)
+      ? rawZoom
+      : DEFAULT_CAMERA_ZOOM;
+  const zoom = Math.max(MIN_CAMERA_ZOOM, Math.min(MAX_CAMERA_ZOOM, safeZoom));
+  const viewWidth = DIM_WIDTH_PX / zoom;
+  const viewHeight = DIM_HEIGHT_PX / zoom;
+
+  if (zoom <= 1) {
+    return {
+      zoom: 1,
+      viewWidth: DIM_WIDTH_PX,
+      viewHeight: DIM_HEIGHT_PX,
+      camX: 0,
+      camY: 0,
+    };
+  }
+
+  const centerX = playerX + TILE_SIZE_PX / 2;
+  const centerY = playerY + TILE_SIZE_PX / 2;
+  const rawCamX = centerX - viewWidth / 2;
+  const rawCamY = centerY - viewHeight / 2;
+
+  const clampedCamX = Math.max(0, Math.min(DIM_WIDTH_PX - viewWidth, rawCamX));
+  const clampedCamY = Math.max(0, Math.min(DIM_HEIGHT_PX - viewHeight, rawCamY));
+  // Snap camera coordinates to screen-pixel increments to prevent sub-pixel tile seams at fractional zooms
+  const camX = Math.round(clampedCamX * zoom) / zoom;
+  const camY = Math.round(clampedCamY * zoom) / zoom;
+
+  return {
+    zoom,
+    viewWidth,
+    viewHeight,
+    camX,
+    camY,
+  };
+}
+
 /**
  * Clamps the 120px-wide popup box strictly inside the local 0..500 x 0..650 viewport
- * so it never clips off-screen or bleeds across the center divider.
+ * (or the active zoomed camera viewport) so it never clips off-screen or bleeds across the center divider.
  */
 export function clampPopupBoxPosition(
   anchorX: number,
   anchorY: number,
   faceDirection: Direction,
   boxWidth: number = POPUP_BOX_WIDTH_PX,
-  boxHeight: number = POPUP_DEFAULT_HEIGHT_PX
+  boxHeight: number = POPUP_DEFAULT_HEIGHT_PX,
+  camera?: CameraViewport
 ): Vector2D {
   let rawX = anchorX - (boxWidth - TILE_SIZE_PX) / 2;
   let rawY = anchorY - boxHeight - 8;
@@ -76,14 +144,25 @@ export function clampPopupBoxPosition(
     rawY = anchorY + TILE_SIZE_PX + 2;
   }
 
-  const minX = POPUP_VIEWPORT_MARGIN_PX;
-  const maxX = DIM_WIDTH_PX - boxWidth - POPUP_VIEWPORT_MARGIN_PX;
-  const minY = POPUP_VIEWPORT_MARGIN_PX;
-  const maxY = DIM_HEIGHT_PX - boxHeight - POPUP_VIEWPORT_MARGIN_PX;
+  const viewLeft = camera ? camera.camX : 0;
+  const viewTop = camera ? camera.camY : 0;
+  const viewW = camera ? camera.viewWidth : DIM_WIDTH_PX;
+  const viewH = camera ? camera.viewHeight : DIM_HEIGHT_PX;
+
+  const minX = viewLeft + POPUP_VIEWPORT_MARGIN_PX;
+  const maxX = viewLeft + viewW - boxWidth - POPUP_VIEWPORT_MARGIN_PX;
+  const minY = viewTop + POPUP_VIEWPORT_MARGIN_PX;
+  const maxY = viewTop + viewH - boxHeight - POPUP_VIEWPORT_MARGIN_PX;
 
   return {
-    x: Math.max(minX, Math.min(maxX, rawX)),
-    y: Math.max(minY, Math.min(maxY, rawY)),
+    x:
+      maxX < minX
+        ? viewLeft + (viewW - boxWidth) / 2
+        : Math.max(minX, Math.min(maxX, rawX)),
+    y:
+      maxY < minY
+        ? viewTop + (viewH - boxHeight) / 2
+        : Math.max(minY, Math.min(maxY, rawY)),
   };
 }
 
@@ -140,10 +219,20 @@ export function wrapPopupLines(
  */
 export function computeFloatingInventoryPosition(
   playerX: number,
-  playerY: number
+  playerY: number,
+  camera?: CameraViewport
 ): Vector2D {
-  const clampedX = Math.max(0, Math.min(DIM_WIDTH_PX - TILE_SIZE_PX, playerX));
-  const y = playerY < TILE_SIZE_PX ? playerY + TILE_SIZE_PX : playerY - TILE_SIZE_PX;
+  const viewLeft = camera ? camera.camX : 0;
+  const viewTop = camera ? camera.camY : 0;
+  const viewRight = camera ? camera.camX + camera.viewWidth : DIM_WIDTH_PX;
+  const clampedX = Math.max(
+    viewLeft,
+    Math.min(viewRight - TILE_SIZE_PX, playerX)
+  );
+  const y =
+    playerY - viewTop < TILE_SIZE_PX
+      ? playerY + TILE_SIZE_PX
+      : playerY - TILE_SIZE_PX;
   return { x: clampedX, y };
 }
 
@@ -248,6 +337,8 @@ export class GameRenderer implements IGameRenderer {
       return;
     }
 
+    const requestedZoom = options.cameraZoom ?? DEFAULT_CAMERA_ZOOM;
+
     if (options.mode === 'local') {
       // Local Mode: 1000x650 Dual Viewport (Left @ 0..500, Right @ 500..1000)
       const leftPlayer =
@@ -255,56 +346,92 @@ export class GameRenderer implements IGameRenderer {
       const rightPlayer =
         state.players[1].side === 'right' ? state.players[1] : state.players[0];
 
-      this.renderSingleDimensionView(
+      const leftCamera = computeCameraViewport(
+        leftPlayer.x,
+        leftPlayer.y,
+        requestedZoom
+      );
+      const rightCamera = computeCameraViewport(
+        rightPlayer.x,
+        rightPlayer.y,
+        requestedZoom
+      );
+
+      this.withDimensionCamera(0, leftCamera, (drawOffsetX) => {
+        this.renderSingleDimensionView(
+          state,
+          'left',
+          leftPlayer,
+          rightPlayer,
+          drawOffsetX,
+          options
+        );
+        if (options.lightingEnabled) {
+          this.lightingRenderer.renderDimensionLighting(
+            ctx,
+            {
+              side: 'left',
+              evilOnLeft: state.evilOnLeft,
+              room: state.room,
+              player: leftPlayer,
+              timeMs: this.elapsedTimeMs,
+            },
+            drawOffsetX
+          );
+        }
+        this.renderFloatingInventoryOverlay(
+          state,
+          leftPlayer,
+          drawOffsetX,
+          leftCamera
+        );
+      });
+      // Draw popups and pings in screen space above lighting so text & indicators never clip at high zoom
+      this.renderPostLightingDimensionOverlays(
         state,
-        'left',
         leftPlayer,
         rightPlayer,
         0,
-        options
-      );
-      this.renderSingleDimensionView(
-        state,
-        'right',
-        rightPlayer,
-        leftPlayer,
-        DIM_WIDTH_PX,
-        options
+        options,
+        leftCamera
       );
 
-      if (options.lightingEnabled) {
-        this.lightingRenderer.renderDimensionLighting(
-          ctx,
-          {
-            side: 'left',
-            evilOnLeft: state.evilOnLeft,
-            room: state.room,
-            player: leftPlayer,
-            timeMs: this.elapsedTimeMs,
-          },
-          0
+      this.withDimensionCamera(DIM_WIDTH_PX, rightCamera, (drawOffsetX) => {
+        this.renderSingleDimensionView(
+          state,
+          'right',
+          rightPlayer,
+          leftPlayer,
+          drawOffsetX,
+          options
         );
-        this.lightingRenderer.renderDimensionLighting(
-          ctx,
-          {
-            side: 'right',
-            evilOnLeft: state.evilOnLeft,
-            room: state.room,
-            player: rightPlayer,
-            timeMs: this.elapsedTimeMs,
-          },
-          DIM_WIDTH_PX
+        if (options.lightingEnabled) {
+          this.lightingRenderer.renderDimensionLighting(
+            ctx,
+            {
+              side: 'right',
+              evilOnLeft: state.evilOnLeft,
+              room: state.room,
+              player: rightPlayer,
+              timeMs: this.elapsedTimeMs,
+            },
+            drawOffsetX
+          );
+        }
+        this.renderFloatingInventoryOverlay(
+          state,
+          rightPlayer,
+          drawOffsetX,
+          rightCamera
         );
-      }
-
-      // Draw popups and floating inventory above lighting so text is always legible
-      this.renderPostLightingDimensionOverlays(state, leftPlayer, rightPlayer, 0, options);
+      });
       this.renderPostLightingDimensionOverlays(
         state,
         rightPlayer,
         leftPlayer,
         DIM_WIDTH_PX,
-        options
+        options,
+        rightCamera
       );
 
       // Subtle center divider line
@@ -331,53 +458,80 @@ export class GameRenderer implements IGameRenderer {
           ? state.players[1]
           : state.players[0];
 
-      this.renderSingleDimensionView(
-        state,
-        localSide,
-        localPlayer,
-        partnerPlayer,
-        0,
-        options
-      );
-
-      // Special Final Room Convergence: dissolve dimensional veil as players approach y > 300
+      // Special Final Room Convergence: dissolve dimensional veil and ease zoom to 1x as players approach y > 300
       const convergenceAlpha = computeFinalRoomConvergenceAlpha(
         state,
         options.mode
       );
-      if (convergenceAlpha > 0) {
-        ctx.save();
-        ctx.globalAlpha = convergenceAlpha * 0.85;
-        this.renderDimensionWorldAndEntities(
-          state,
-          partnerSide,
-          partnerPlayer,
-          0
-        );
-        this.drawPlayerEntity(partnerPlayer, 0, state);
-        ctx.restore();
-      }
+      const effectiveZoom =
+        convergenceAlpha > 0
+          ? requestedZoom + (1 - requestedZoom) * convergenceAlpha
+          : requestedZoom;
 
-      if (options.lightingEnabled) {
-        this.lightingRenderer.renderDimensionLighting(
-          ctx,
-          {
-            side: localSide,
-            evilOnLeft: state.evilOnLeft,
-            room: state.room,
-            player: localPlayer,
-            timeMs: this.elapsedTimeMs,
-          },
-          0
+      const localCamera = computeCameraViewport(
+        localPlayer.x,
+        localPlayer.y,
+        effectiveZoom
+      );
+
+      this.withDimensionCamera(0, localCamera, (drawOffsetX) => {
+        this.renderSingleDimensionView(
+          state,
+          localSide,
+          localPlayer,
+          partnerPlayer,
+          drawOffsetX,
+          options
         );
-      }
+
+        if (convergenceAlpha > 0) {
+          ctx.save();
+          ctx.globalAlpha = convergenceAlpha * 0.85;
+          this.renderDimensionWorldAndEntities(
+            state,
+            partnerSide,
+            partnerPlayer,
+            drawOffsetX
+          );
+          this.drawPlayerEntity(partnerPlayer, drawOffsetX, state);
+          ctx.restore();
+        }
+
+        if (options.lightingEnabled) {
+          this.lightingRenderer.renderDimensionLighting(
+            ctx,
+            {
+              side: localSide,
+              evilOnLeft: state.evilOnLeft,
+              room: state.room,
+              player: localPlayer,
+              timeMs: this.elapsedTimeMs,
+            },
+            drawOffsetX
+          );
+          if (convergenceAlpha > 0) {
+            ctx.save();
+            ctx.globalAlpha = convergenceAlpha * 0.85;
+            this.drawPlayerEntity(partnerPlayer, drawOffsetX, state);
+            ctx.restore();
+          }
+        }
+
+        this.renderFloatingInventoryOverlay(
+          state,
+          localPlayer,
+          drawOffsetX,
+          localCamera
+        );
+      });
 
       this.renderPostLightingDimensionOverlays(
         state,
         localPlayer,
         partnerPlayer,
         0,
-        options
+        options,
+        localCamera
       );
     }
 
@@ -417,6 +571,32 @@ export class GameRenderer implements IGameRenderer {
         }
       }
     }
+  }
+
+  private withDimensionCamera(
+    offsetX: number,
+    camera: CameraViewport,
+    fn: (drawOffsetX: number) => void
+  ): void {
+    if (camera.zoom <= 1) {
+      fn(offsetX);
+      return;
+    }
+
+    this.ctx.save();
+    if ('imageSmoothingEnabled' in this.ctx) {
+      this.ctx.imageSmoothingEnabled = false;
+    }
+    this.ctx.beginPath();
+    this.ctx.rect(offsetX, 0, DIM_WIDTH_PX, DIM_HEIGHT_PX);
+    this.ctx.clip();
+    if (offsetX !== 0) {
+      this.ctx.translate(offsetX, 0);
+    }
+    this.ctx.scale(camera.zoom, camera.zoom);
+    this.ctx.translate(-camera.camX, -camera.camY);
+    fn(0);
+    this.ctx.restore();
   }
 
   private renderSingleDimensionView(
@@ -765,23 +945,24 @@ export class GameRenderer implements IGameRenderer {
     this.ctx.restore();
   }
 
-  private renderPostLightingDimensionOverlays(
+  private renderFloatingInventoryOverlay(
     state: GameState,
     player: PlayerState,
-    partner: PlayerState,
     offsetX: number,
-    options: RenderOptions
+    camera?: CameraViewport
   ): void {
-    const worldType = getWorldForSide(player.side, state.evilOnLeft);
-
-    // 1. Floating Inventory Icon above player's head (or below if player.y < 25)
     if (
       player.inventoryDisplayTimerMs > 0 &&
       player.inventory.length > 0 &&
       player.inventory[player.currentItemIndex]
     ) {
+      const worldType = getWorldForSide(player.side, state.evilOnLeft);
       const currentItem = player.inventory[player.currentItemIndex];
-      const invPos = computeFloatingInventoryPosition(player.x, player.y);
+      const invPos = computeFloatingInventoryPosition(
+        player.x,
+        player.y,
+        camera
+      );
       const itemRect = getItemSpriteRect(
         currentItem.type,
         worldType,
@@ -789,8 +970,17 @@ export class GameRenderer implements IGameRenderer {
       );
       this.drawSpriteRect(itemRect, offsetX + invPos.x, invPos.y);
     }
+  }
 
-    // 2. Clamped Popup Text Box (120px wide, strictly clamped to 0..500 x 0..650)
+  private renderPostLightingDimensionOverlays(
+    _state: GameState,
+    player: PlayerState,
+    partner: PlayerState,
+    offsetX: number,
+    options: RenderOptions,
+    camera?: CameraViewport
+  ): void {
+    // 1. Clamped Popup Text Box (120px wide in screen space, strictly clamped to 0..500 x 0..650)
     if (player.activePopupText) {
       const formatted = formatPopupText(
         player.activePopupText,
@@ -798,9 +988,17 @@ export class GameRenderer implements IGameRenderer {
       );
       const lines = wrapPopupLines(formatted, 16);
       const boxHeight = Math.max(28, lines.length * 14 + 10);
+      const screenAnchorX =
+        camera && camera.zoom > 1
+          ? (player.x - camera.camX) * camera.zoom
+          : player.x;
+      const screenAnchorY =
+        camera && camera.zoom > 1
+          ? (player.y - camera.camY) * camera.zoom
+          : player.y;
       const clamped = clampPopupBoxPosition(
-        player.x,
-        player.y,
+        screenAnchorX,
+        screenAnchorY,
         player.popupFaceDirection,
         POPUP_BOX_WIDTH_PX,
         boxHeight
@@ -836,22 +1034,49 @@ export class GameRenderer implements IGameRenderer {
       this.ctx.restore();
     }
 
-    // 3. Quick Ping Ripples (both local player and partner pings)
+    // 2. Quick Ping Ripples (projected into screen space with off-camera edge indicator)
     if (player.ping?.active) {
-      this.renderPingRipple(player.ping, offsetX, '#38bdf8');
+      this.renderPingRipple(player.ping, offsetX, '#38bdf8', camera);
     }
     if (partner.ping?.active) {
-      this.renderPingRipple(partner.ping, offsetX, '#f43f5e');
+      this.renderPingRipple(partner.ping, offsetX, '#f43f5e', camera);
     }
   }
 
   private renderPingRipple(
     ping: NonNullable<PlayerState['ping']>,
     offsetX: number,
-    color: string
+    color: string,
+    camera?: CameraViewport
   ): void {
-    const cx = offsetX + ping.x + TILE_SIZE_PX / 2;
-    const cy = ping.y + TILE_SIZE_PX / 2;
+    const worldCx = ping.x + TILE_SIZE_PX / 2;
+    const worldCy = ping.y + TILE_SIZE_PX / 2;
+    const rawScreenCx =
+      camera && camera.zoom > 1
+        ? (worldCx - camera.camX) * camera.zoom
+        : worldCx;
+    const rawScreenCy =
+      camera && camera.zoom > 1
+        ? (worldCy - camera.camY) * camera.zoom
+        : worldCy;
+    const margin = 28;
+    const isOffCamera =
+      Boolean(camera && camera.zoom > 1) &&
+      (rawScreenCx < margin ||
+        rawScreenCx > DIM_WIDTH_PX - margin ||
+        rawScreenCy < margin ||
+        rawScreenCy > DIM_HEIGHT_PX - margin);
+    const localCx =
+      camera && camera.zoom > 1
+        ? Math.max(margin, Math.min(DIM_WIDTH_PX - margin, rawScreenCx))
+        : rawScreenCx;
+    const localCy =
+      camera && camera.zoom > 1
+        ? Math.max(margin, Math.min(DIM_HEIGHT_PX - margin, rawScreenCy))
+        : rawScreenCy;
+
+    const cx = offsetX + localCx;
+    const cy = localCy;
     const progress = 1 - Math.max(0, Math.min(1, ping.remainingMs / 2500));
     const radius = 10 + progress * 28;
     const label = ping.kind.toUpperCase();
@@ -860,9 +1085,15 @@ export class GameRenderer implements IGameRenderer {
     this.ctx.strokeStyle = color;
     this.ctx.lineWidth = 2;
     this.ctx.globalAlpha = Math.max(0.2, 1 - progress * 0.8);
+    if (isOffCamera) {
+      this.ctx.setLineDash([4, 3]);
+    }
     this.ctx.beginPath();
     this.ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     this.ctx.stroke();
+    if (isOffCamera) {
+      this.ctx.setLineDash([]);
+    }
 
     this.ctx.fillStyle = '#FFFFFF';
     this.ctx.font = 'bold 10px FixedSys, monospace';
@@ -922,7 +1153,7 @@ export class GameRenderer implements IGameRenderer {
       const bannerW = Math.min(viewportWidth - 20, 460);
       const bannerH = hasWallHazard ? 54 : 36;
       const bx = centerX - bannerW / 2;
-      const by = 10;
+      const by = 46;
 
       this.ctx.save();
       this.ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   ACCESS_PASSWORD,
   STORAGE_KEY,
@@ -190,6 +192,20 @@ describe('PasswordGate', () => {
 
       expect(windowKeyListener).not.toHaveBeenCalled();
       window.removeEventListener('keydown', windowKeyListener);
+    });
+
+    it('constrains password input and toggle button with min-width: 0 and flex-shrink so SHOW button never overflows the card frame on narrow mobile screens', () => {
+      const css = readFileSync(
+        resolve(__dirname, '../../src/style.css'),
+        'utf-8'
+      );
+      const inputRuleMatch = css.match(/\.password-gate-input\s*\{([^}]*)\}/);
+      expect(inputRuleMatch).toBeTruthy();
+      expect(inputRuleMatch![1]).toContain('min-width: 0');
+
+      const toggleRuleMatch = css.match(/\.password-gate-toggle\s*\{([^}]*)\}/);
+      expect(toggleRuleMatch).toBeTruthy();
+      expect(toggleRuleMatch![1]).toContain('flex-shrink: 0');
     });
   });
 });

@@ -3,8 +3,9 @@
 
 import './style.css';
 import { ShiftGameApp } from './app';
+import { setupPasswordGate } from './ui/passwordGate';
 
-function bootstrap(): void {
+function bootGame(): void {
   const stage = document.getElementById('ui-overlay');
   const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
 
@@ -25,6 +26,12 @@ function bootstrap(): void {
   };
 }
 
+function bootstrap(): void {
+  setupPasswordGate({
+    onUnlocked: bootGame,
+  });
+}
+
 if (typeof window !== 'undefined') {
   if (document.readyState === 'loading') {
     window.addEventListener('DOMContentLoaded', bootstrap);
@@ -32,3 +39,4 @@ if (typeof window !== 'undefined') {
     bootstrap();
   }
 }
+

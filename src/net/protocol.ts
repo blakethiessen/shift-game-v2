@@ -12,9 +12,15 @@ import {
   PingKind,
   PingPongPacket,
   PlayerInput,
+  RoomPersistenceState,
   StatePacket,
   createDefaultPlayerInput,
 } from '../shared/types';
+import {
+  createEmptyRoomPersistence,
+  getStaticRoomCells,
+} from '../core/levelParser';
+import { RAW_LEVELS } from '../core/levelData';
 
 export const PEER_ID_PREFIX = 'shift-game-room-';
 
@@ -471,10 +477,77 @@ export function isValidNetPacket(value: unknown): value is NetPacket {
   }
 }
 
+function isModifiedRoomPersistence(p: RoomPersistenceState | undefined): boolean {
+  if (!p) return false;
+  return (
+    p.visited ||
+    p.removedItemCoords.length > 0 ||
+    p.addedItems.length > 0 ||
+    p.unlockedDoorCoords.length > 0 ||
+    p.lamps.length > 0 ||
+    p.blobbies.length > 0 ||
+    p.tears.length > 0 ||
+    Object.keys(p.chests).length > 0 ||
+    p.safeOpened ||
+    p.statue.hasRedGem ||
+    p.statue.hasBlueGem ||
+    p.statue.hasGreenGem ||
+    p.statue.blackKeySpawned ||
+    p.safePlatesPressedIds.length > 0 ||
+    p.swooshTriggered
+  );
+}
+
 /**
- * Serializes a validated NetPacket into a JSON string for WebRTC DataChannel transmission.
+ * Serializes a validated NetPacket into a JSON string for WebRTC/Relay transmission.
+ * For `state` packets, strips the static 20x26 `GridCell` matrices (`neutral.cells` and
+ * `dangerous.cells`) and unvisited empty `persistence` entries when `roomName` is in
+ * `RAW_LEVELS`, reducing wire payload size from ~272KB to ~3.5KB (preventing WebSocket
+ * 1009 MessageTooBig disconnects on relays).
  */
 export function serializePacket(packet: NetPacket): string {
+  if (packet.type === 'state') {
+    const st = packet.state;
+    const neutralCells = st?.room?.worlds?.neutral?.cells;
+    const dangerousCells = st?.room?.worlds?.dangerous?.cells;
+    if (
+      Array.isArray(neutralCells) &&
+      neutralCells.length > 0 &&
+      Array.isArray(dangerousCells) &&
+      dangerousCells.length > 0 &&
+      getStaticRoomCells(st.roomName) !== null
+    ) {
+      const compactPersistence: Record<string, RoomPersistenceState> = {};
+      if (st.persistence && typeof st.persistence === 'object') {
+        for (const [roomKey, record] of Object.entries(st.persistence)) {
+          if (isModifiedRoomPersistence(record)) {
+            compactPersistence[roomKey] = record;
+          }
+        }
+      }
+      return JSON.stringify({
+        ...packet,
+        _cellsCompacted: true,
+        state: {
+          ...st,
+          persistence: compactPersistence,
+          room: {
+            ...st.room,
+            worlds: {
+              neutral: {
+                ...st.room.worlds.neutral,
+                cells: [],
+              },
+              dangerous: {
+                ...st.room.worlds.dangerous,
+                cells: [],
+              },
+            },
+          },
+        },
+      });
+    }
+  }
   return JSON.stringify(packet);
 }
 
@@ -514,6 +587,33 @@ export function deserializePacket(raw: unknown): NetPacket | null {
 
   if (!isValidNetPacket(parsed)) {
     return null;
+  }
+
+  if (
+    parsed.type === 'state' &&
+    (parsed as unknown as { _cellsCompacted?: unknown })._cellsCompacted === true
+  ) {
+    delete (parsed as unknown as { _cellsCompacted?: unknown })._cellsCompacted;
+    const staticCells = getStaticRoomCells(parsed.state.roomName);
+    if (staticCells && parsed.state.room?.worlds) {
+      if (parsed.state.room.worlds.neutral) {
+        parsed.state.room.worlds.neutral.cells = staticCells.neutral;
+      }
+      if (parsed.state.room.worlds.dangerous) {
+        parsed.state.room.worlds.dangerous.cells = staticCells.dangerous;
+      }
+    }
+    const fullPersistence: Record<string, RoomPersistenceState> = {};
+    for (const roomKey of Object.keys(RAW_LEVELS)) {
+      fullPersistence[roomKey] =
+        parsed.state.persistence?.[roomKey] ?? createEmptyRoomPersistence();
+    }
+    if (parsed.state.persistence) {
+      for (const [k, v] of Object.entries(parsed.state.persistence)) {
+        fullPersistence[k] = v;
+      }
+    }
+    parsed.state.persistence = fullPersistence;
   }
 
   return parsed as InputPacket | StatePacket | LobbySyncPacket | PingPongPacket;

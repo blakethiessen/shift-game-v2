@@ -473,4 +473,35 @@ describe('MenuSystem', () => {
       })
     );
   });
+
+  it('supports pasting full invite URLs into Join Room input on mobile, sets mobile keyboard attributes, and submits on Enter', () => {
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: peer,
+    });
+    menu.showScreen('lobby');
+
+    const joinTabBtn = container.querySelector('[data-testid="lobby-tab-join"]') as HTMLButtonElement;
+    joinTabBtn.click();
+
+    const codeInput = container.querySelector('[data-testid="join-room-input"]') as HTMLInputElement;
+    expect(codeInput).toBeTruthy();
+    expect(codeInput.getAttribute('autocapitalize')).toBe('characters');
+    expect(codeInput.getAttribute('autocorrect')).toBe('off');
+    expect(codeInput.getAttribute('spellcheck')).toBe('false');
+    expect(codeInput.maxLength).toBeGreaterThanOrEqual(128);
+
+    // Pasting a full invite URL into the input extracts the 5-char room code instead of truncating "https://..."
+    codeInput.value = 'https://shift-game-v2.web.app/?room=k7m9p';
+    codeInput.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(codeInput.value).toBe('K7M9P');
+
+    // Pressing Enter inside the input triggers joinRoom('K7M9P')
+    codeInput.dispatchEvent(
+      new KeyboardEvent('keydown', { code: 'Enter', key: 'Enter', bubbles: true })
+    );
+    expect(peer.joinRoom).toHaveBeenCalledWith('K7M9P');
+  });
 });

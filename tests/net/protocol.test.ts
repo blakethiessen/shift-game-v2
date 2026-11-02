@@ -18,6 +18,11 @@ import {
 import {
   PeerManager,
   InMemoryPeerBus,
+  DEFAULT_ICE_SERVERS,
+  DEFAULT_JOIN_TIMEOUT_MS,
+  buildIceServers,
+  IPeerLike,
+  IDataConnectionLike,
 } from '../../src/net/peerManager';
 import {
   ConnectionState,
@@ -31,6 +36,7 @@ import {
   createDefaultLobbyConfig,
   createDefaultPlayerInput,
 } from '../../src/shared/types';
+import { GameEngine } from '../../src/core/gameEngine';
 
 function createMinimalGameState(overrides: Partial<GameState> = {}): GameState {
   const emptySide = {
@@ -596,5 +602,400 @@ describe('PeerManager P2P Handshake, Sync, Ping/Pong RTT & Disconnect (peerManag
 
     host1.disconnect();
     host2.disconnect();
+  });
+
+  it('provides clean default STUN servers (without dead turn.peerjs.com hosts) and builds TURN iceServers from env or options', () => {
+    expect(DEFAULT_ICE_SERVERS.length).toBeGreaterThanOrEqual(3);
+    const serializedDefaults = JSON.stringify(DEFAULT_ICE_SERVERS);
+    expect(serializedDefaults).toContain('stun:stun.l.google.com:19302');
+    expect(serializedDefaults).toContain('stun:stun.cloudflare.com:3478');
+    expect(serializedDefaults).not.toContain('turn.peerjs.com');
+
+    // Builds TURN server entries when VITE_TURN_URLS is provided
+    const withTurn = buildIceServers({
+      VITE_TURN_URLS:
+        'turn:global.relay.metered.ca:80, turns:global.relay.metered.ca:443?transport=tcp',
+      VITE_TURN_USERNAME: 'turnuser',
+      VITE_TURN_CREDENTIAL: 'turnpass',
+    });
+    expect(withTurn).toEqual([
+      ...DEFAULT_ICE_SERVERS,
+      {
+        urls: [
+          'turn:global.relay.metered.ca:80',
+          'turns:global.relay.metered.ca:443?transport=tcp',
+        ],
+        username: 'turnuser',
+        credential: 'turnpass',
+      },
+    ]);
+
+    // Supports VITE_ICE_SERVERS JSON array
+    const fromJson = buildIceServers({
+      VITE_ICE_SERVERS: JSON.stringify([
+        {
+          urls: 'turns:custom.turn.example.com:443',
+          username: 'u',
+          credential: 'p',
+        },
+      ]),
+    });
+    expect(fromJson).toEqual([
+      ...DEFAULT_ICE_SERVERS,
+      {
+        urls: 'turns:custom.turn.example.com:443',
+        username: 'u',
+        credential: 'p',
+      },
+    ]);
+
+    // Passes RTCConfiguration with iceServers into peerFactory
+    const spyFactory = vi.fn(new InMemoryPeerBus().createPeerFactory());
+    const customIce = [{ urls: 'stun:custom.stun.example:3478' }];
+    const mgr = new PeerManager({
+      peerFactory: spyFactory,
+      iceServers: customIce,
+    });
+    void mgr.hostRoom('K7M9P');
+    expect(spyFactory).toHaveBeenCalledWith(
+      'shift-game-room-k7m9p',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          iceServers: customIce,
+        }),
+      })
+    );
+    mgr.disconnect();
+  });
+
+  it('ignores non-fatal mobile WebRTC ICE candidate errors (type: "webrtc") during handshake and gameplay', async () => {
+    const bus = new InMemoryPeerBus();
+    const host = new PeerManager(bus.createPeerFactory());
+    const client = new PeerManager(bus.createPeerFactory());
+
+    const hostStates: ConnectionState[] = [];
+    const clientStates: ConnectionState[] = [];
+    host.onStateChange((st) => hostStates.push(st));
+    client.onStateChange((st) => clientStates.push(st));
+
+    await host.hostRoom('MBL01');
+
+    // Simulate mobile PeerJS emitting non-fatal 'webrtc' error when one interface ICE candidate fails
+    const hostPeer = bus.getPeer('shift-game-room-mbl01')!;
+    const webrtcErr = new Error(
+      'OperationError: Failed to execute addIceCandidate'
+    ) as Error & { type?: string };
+    webrtcErr.type = 'webrtc';
+    hostPeer.emitPeerError(webrtcErr);
+
+    // Host must remain in 'hosting' state and not transition to 'error'
+    expect(host.getConnectionState()).toBe('hosting');
+    expect(hostStates).toEqual(['hosting']);
+
+    await client.joinRoom('MBL01');
+    expect(host.getConnectionState()).toBe('connected');
+    expect(client.getConnectionState()).toBe('connected');
+
+    // Emitting a late 'webrtc' candidate error while connected must not drop the connection
+    hostPeer.emitPeerError(webrtcErr);
+    expect(host.getConnectionState()).toBe('connected');
+
+    host.disconnect();
+    client.disconnect();
+  });
+
+  it('auto-reconnects signaling socket when mobile Host backgrounds app while hosting, and keeps P2P game alive if signaling drops while connected', async () => {
+    const bus = new InMemoryPeerBus();
+    const host = new PeerManager(bus.createPeerFactory());
+    const client = new PeerManager(bus.createPeerFactory());
+
+    await host.hostRoom('MBL02');
+    const hostPeer = bus.getPeer('shift-game-room-mbl02')!;
+    const reconnectSpy = vi.spyOn(hostPeer, 'reconnect');
+
+    // Simulate mobile Host switching apps to share invite link:
+    // PeerJS emits 'error' (type: 'network') and 'disconnected'
+    const netErr = new Error('Lost connection to server.') as Error & {
+      type?: string;
+    };
+    netErr.type = 'network';
+    hostPeer.emitPeerError(netErr);
+    hostPeer.disconnect();
+
+    expect(reconnectSpy).toHaveBeenCalled();
+    expect(host.getConnectionState()).toBe('hosting');
+
+    // Client can still join after Host signaling reconnects
+    await client.joinRoom('MBL02');
+    expect(host.getConnectionState()).toBe('connected');
+    expect(client.getConnectionState()).toBe('connected');
+
+    // Now simulate signaling broker dropping while P2P DataChannel is already open & active:
+    // Active P2P connection must stay 'connected', not abort to 'error'!
+    hostPeer.emitPeerError(netErr);
+    hostPeer.disconnect();
+    expect(host.getConnectionState()).toBe('connected');
+
+    host.disconnect();
+    client.disconnect();
+  });
+
+  it('times out joinRoom() cleanly when WebRTC DataChannel negotiation stalls on restricted mobile NAT', async () => {
+    expect(DEFAULT_JOIN_TIMEOUT_MS).toBeGreaterThanOrEqual(5000);
+
+    // Create a peerFactory where Peer opens on signaling server, but DataConnection never opens
+    const stallingFactory = (): IPeerLike => {
+      let openHandler: ((id: string) => void) | null = null;
+      const fakeConn: IDataConnectionLike = {
+        peer: 'shift-game-room-stall',
+        open: false,
+        send: vi.fn(),
+        close: vi.fn(),
+        on: vi.fn(),
+      };
+      const fakePeer: IPeerLike = {
+        id: 'client-stall-1',
+        destroyed: false,
+        disconnected: false,
+        connect: vi.fn(() => fakeConn),
+        destroy: vi.fn(),
+        disconnect: vi.fn(),
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === 'open') {
+            openHandler = cb as (id: string) => void;
+          }
+          return fakePeer;
+        }),
+      };
+      queueMicrotask(() => {
+        openHandler?.('client-stall-1');
+      });
+      return fakePeer;
+    };
+
+    const client = new PeerManager({
+      peerFactory: stallingFactory,
+      joinTimeoutMs: 3000,
+    });
+    const states: Array<{ state: ConnectionState; error?: string }> = [];
+    client.onStateChange((state, error) => states.push({ state, error }));
+
+    let rejectedError = null as Error | null;
+    const joinPromise = client.joinRoom('STALL').catch((err: Error) => {
+      rejectedError = err;
+    });
+
+    await Promise.resolve();
+    expect(client.getConnectionState()).toBe('joining');
+
+    vi.advanceTimersByTime(3100);
+    await joinPromise;
+
+    expect(rejectedError).toBeInstanceOf(Error);
+    expect(rejectedError?.message).toMatch(/timed out/i);
+    expect(client.getConnectionState()).toBe('error');
+    expect(states.some((s) => s.state === 'error' && /timed out/i.test(s.error ?? ''))).toBe(true);
+  });
+
+  it('automatically falls back to PeerSocket WebSocket relay when WebRTC DataChannel is blocked on mobile NAT', async () => {
+    // Simulate a signaling broker where Peer.socket can exchange messages (WSS port 443),
+    // but direct WebRTC DataConnection never opens (and later emits negotiation-failed).
+    type SocketListener = (data: unknown) => void;
+    const sockets = new Map<
+      string,
+      {
+        listeners: Map<string, Set<SocketListener>>;
+        send: (data: unknown) => void;
+      }
+    >();
+
+    const createSocket = (myPeerId: string) => {
+      const listeners = new Map<string, Set<SocketListener>>();
+      const socketObj = {
+        on: vi.fn((event: string, cb: SocketListener) => {
+          let set = listeners.get(event);
+          if (!set) {
+            set = new Set();
+            listeners.set(event, set);
+          }
+          set.add(cb);
+          return socketObj;
+        }),
+        off: vi.fn((event: string, cb: SocketListener) => {
+          listeners.get(event)?.delete(cb);
+          return socketObj;
+        }),
+        removeListener: vi.fn((event: string, cb: SocketListener) => {
+          listeners.get(event)?.delete(cb);
+          return socketObj;
+        }),
+        send: vi.fn((raw: unknown) => {
+          const msg = raw as {
+            type?: string;
+            dst?: string;
+            payload?: unknown;
+          };
+          if (!msg || !msg.dst) return;
+          const target = sockets.get(msg.dst);
+          if (!target) return;
+          const forwarded = {
+            type: msg.type,
+            src: myPeerId,
+            dst: msg.dst,
+            payload: msg.payload,
+          };
+          queueMicrotask(() => {
+            for (const fn of target.listeners.get('message') ?? []) {
+              fn(forwarded);
+            }
+          });
+        }),
+      };
+      sockets.set(myPeerId, { listeners, send: socketObj.send });
+      return socketObj;
+    };
+
+    let clientWebRtcErrorCb = null as ((err: Error) => void) | null;
+    let clientWebRtcCloseCb = null as (() => void) | null;
+
+    const mobileBlockedWebRtcFactory = (requestedId?: string): IPeerLike => {
+      const peerId = requestedId ?? 'mobile-client-peer-1';
+      let openHandler: ((id: string) => void) | null = null;
+      const socket = createSocket(peerId);
+
+      const stalledWebRtcConn: IDataConnectionLike = {
+        peer: 'shift-game-room-mbl99',
+        open: false,
+        send: vi.fn(),
+        close: vi.fn(),
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === 'error') clientWebRtcErrorCb = cb as (err: Error) => void;
+          if (event === 'close') clientWebRtcCloseCb = cb as () => void;
+          return stalledWebRtcConn;
+        }),
+      };
+
+      const fakePeer: IPeerLike = {
+        id: peerId,
+        destroyed: false,
+        disconnected: false,
+        socket,
+        connect: vi.fn(() => stalledWebRtcConn),
+        destroy: vi.fn(),
+        disconnect: vi.fn(),
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === 'open') {
+            openHandler = cb as (id: string) => void;
+          }
+          return fakePeer;
+        }),
+      };
+
+      queueMicrotask(() => {
+        openHandler?.(peerId);
+      });
+
+      return fakePeer;
+    };
+
+    let clock = 1000;
+    const host = new PeerManager({
+      peerFactory: mobileBlockedWebRtcFactory,
+      relayFallbackDelayMs: 500,
+      now: () => clock,
+    });
+    const client = new PeerManager({
+      peerFactory: mobileBlockedWebRtcFactory,
+      relayFallbackDelayMs: 500,
+      now: () => clock,
+    });
+
+    const code = await host.hostRoom('MBL99');
+    expect(code).toBe('MBL99');
+
+    const joinPromise = client.joinRoom('MBL99');
+    await Promise.resolve();
+    expect(client.getConnectionState()).toBe('joining');
+
+    // Advance past relayFallbackDelayMs (500ms) so WS relay SYN/ACK completes
+    vi.advanceTimersByTime(600);
+    await Promise.resolve();
+    await Promise.resolve();
+    await joinPromise;
+
+    expect(host.getConnectionState()).toBe('connected');
+    expect(client.getConnectionState()).toBe('connected');
+    expect(client.isUsingRelay()).toBe(true);
+    expect(host.isUsingRelay()).toBe(true);
+
+    // Verify packets flow bidirectionally over the WebSocket signaling relay,
+    // including a full GameEngine StatePacket without exceeding 0.peerjs.com's 64KB frame limit
+    const hostReceived: NetPacket[] = [];
+    const clientReceived: NetPacket[] = [];
+    host.onPacket((pkt) => hostReceived.push(pkt));
+    client.onPacket((pkt) => clientReceived.push(pkt));
+
+    host.sendPacket({
+      type: 'lobbySync',
+      lobbyConfig: createDefaultLobbyConfig(),
+      hostReady: true,
+      clientReady: false,
+      startGame: false,
+    });
+    await Promise.resolve();
+    expect(clientReceived.some((p) => p.type === 'lobbySync')).toBe(true);
+
+    // Send a real full GameEngine StatePacket (which has 20x26 neutral & dangerous cells)
+    const engine = new GameEngine();
+    const fullState = engine.getState();
+    expect(fullState.room.worlds.neutral.cells.length).toBe(20);
+    expect(fullState.room.worlds.dangerous.cells.length).toBe(20);
+
+    const rawWireState = serializePacket({
+      type: 'state',
+      hostTick: 1,
+      lastProcessedClientTick: 0,
+      state: fullState,
+    });
+    // Wire payload is compacted from ~272KB down to ~15KB (well below 0.peerjs.com's 64KB limit)
+    expect(rawWireState.length).toBeLessThan(20000);
+
+    host.sendPacket({
+      type: 'state',
+      hostTick: 1,
+      lastProcessedClientTick: 0,
+      state: fullState,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const receivedStatePkt = clientReceived.find(
+      (p): p is StatePacket => p.type === 'state'
+    );
+    expect(receivedStatePkt).toBeDefined();
+    expect(receivedStatePkt?.state.room.worlds.neutral.cells.length).toBe(20);
+    expect(receivedStatePkt?.state.room.worlds.dangerous.cells.length).toBe(20);
+
+    client.sendPacket({
+      type: 'input',
+      playerId: 2,
+      clientTick: 1,
+      input: createDefaultPlayerInput(),
+    });
+    await Promise.resolve();
+    expect(hostReceived.some((p) => p.type === 'input')).toBe(true);
+
+    // Even if the underlying WebRTC attempt later fails ("negotiation-failed") and closes,
+    // the active WebSocket relay connection remains connected!
+    const webrtcErr = Object.assign(new Error('Negotiation failed'), {
+      type: 'negotiation-failed',
+    });
+    clientWebRtcErrorCb?.(webrtcErr);
+    clientWebRtcCloseCb?.();
+    expect(client.getConnectionState()).toBe('connected');
+    expect(host.getConnectionState()).toBe('connected');
+
+    host.disconnect();
+    client.disconnect();
   });
 });

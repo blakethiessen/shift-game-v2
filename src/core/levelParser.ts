@@ -274,6 +274,33 @@ export function getReachableRooms(startRoom: string = 'spawnRoom'): Set<string> 
   return visited;
 }
 
+const staticRoomCellsCache = new Map<
+  string,
+  { neutral: GridCell[][]; dangerous: GridCell[][] }
+>();
+
+/**
+ * Returns the cached static 20x26 GridCell matrices for `neutral` and `dangerous`
+ * worlds in a known room, or null if `roomName` is not in RAW_LEVELS.
+ */
+export function getStaticRoomCells(
+  roomName: string
+): { neutral: GridCell[][]; dangerous: GridCell[][] } | null {
+  if (!roomName || !RAW_LEVELS[roomName]) {
+    return null;
+  }
+  let cached = staticRoomCellsCache.get(roomName);
+  if (!cached) {
+    const parsed = parseRoom(roomName);
+    cached = {
+      neutral: parsed.worlds.neutral.cells,
+      dangerous: parsed.worlds.dangerous.cells,
+    };
+    staticRoomCellsCache.set(roomName, cached);
+  }
+  return cached;
+}
+
 export function parseRoom(
   roomName: string,
   rng: SeededRandom = new SeededRandom(0x5f3759df),

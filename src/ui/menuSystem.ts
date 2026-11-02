@@ -15,6 +15,7 @@ import {
   DEFAULT_WINDOW_SCALE_MODE,
   WINDOW_SCALE_MODES,
 } from '../renderer/gameRenderer';
+import { getRoomCodeFromUrl, normalizeRoomCode } from '../net/protocol';
 
 export type MenuScreen =
   | 'start'
@@ -166,19 +167,26 @@ export class MenuSystem {
         this.peerManager &&
         this.connectionState === 'disconnected'
       ) {
-        void this.peerManager.hostRoom().then((code) => {
-          this.roomCode = code;
-          if (this.currentScreen === 'lobby') {
-            this.render();
-          }
-        });
+        void this.peerManager
+          .hostRoom()
+          .then((code) => {
+            this.roomCode = code;
+            if (this.currentScreen === 'lobby') {
+              this.render();
+            }
+          })
+          .catch(() => {
+            // Error state is surfaced via peerManager.onStateChange
+          });
       } else if (
         this.lobbyTab === 'join' &&
         this.peerManager &&
         this.connectionState === 'disconnected' &&
         this.joinCodeInput.trim().length >= 3
       ) {
-        void this.peerManager.joinRoom(this.joinCodeInput.trim());
+        void this.peerManager.joinRoom(this.joinCodeInput.trim()).catch(() => {
+          // Error state is surfaced via peerManager.onStateChange
+        });
       }
     } else if (screen === 'tutorial') {
       this.lobbyConfig.mode = 'local';
@@ -526,10 +534,15 @@ export class MenuSystem {
       }
       this.lobbyTab = 'host';
       if (this.peerManager) {
-        void this.peerManager.hostRoom().then((code) => {
-          this.roomCode = code;
-          this.render();
-        });
+        void this.peerManager
+          .hostRoom()
+          .then((code) => {
+            this.roomCode = code;
+            this.render();
+          })
+          .catch(() => {
+            // Error state is surfaced via peerManager.onStateChange
+          });
       }
       this.render();
     });
@@ -617,11 +630,44 @@ export class MenuSystem {
       codeInput.type = 'text';
       codeInput.className = 'lobby-input';
       codeInput.setAttribute('data-testid', 'join-room-input');
+      codeInput.setAttribute('autocapitalize', 'characters');
+      codeInput.setAttribute('autocorrect', 'off');
+      codeInput.setAttribute('autocomplete', 'off');
+      codeInput.setAttribute('spellcheck', 'false');
+      codeInput.setAttribute('enterkeyhint', 'go');
       codeInput.placeholder = 'AB12C';
-      codeInput.maxLength = 12;
+      codeInput.maxLength = 256;
       codeInput.value = this.joinCodeInput;
       codeInput.addEventListener('input', () => {
-        this.joinCodeInput = codeInput.value.toUpperCase();
+        const raw = codeInput.value;
+        const fromUrl =
+          raw.includes('?') || raw.includes('://') || /room=/i.test(raw)
+            ? getRoomCodeFromUrl(raw)
+            : null;
+        const parsed = fromUrl ?? normalizeRoomCode(raw).slice(0, 12);
+        this.joinCodeInput = parsed;
+        if (codeInput.value !== parsed) {
+          codeInput.value = parsed;
+        }
+      });
+
+      const triggerJoinRoom = (): void => {
+        this.audioManager.playSound('menuSelect');
+        if (this.joinCodeInput.trim() && this.peerManager) {
+          void this.peerManager
+            .joinRoom(this.joinCodeInput.trim())
+            .catch(() => {
+              // Error state is surfaced via peerManager.onStateChange
+            });
+        }
+      };
+
+      codeInput.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.code === 'Enter' || e.key === 'Enter') {
+          e.preventDefault();
+          e.stopPropagation();
+          triggerJoinRoom();
+        }
       });
 
       const connectBtn = document.createElement('button');
@@ -629,12 +675,7 @@ export class MenuSystem {
       connectBtn.className = 'action-btn';
       connectBtn.setAttribute('data-testid', 'join-connect-btn');
       connectBtn.textContent = 'JOIN ROOM';
-      connectBtn.addEventListener('click', () => {
-        this.audioManager.playSound('menuSelect');
-        if (this.joinCodeInput.trim() && this.peerManager) {
-          void this.peerManager.joinRoom(this.joinCodeInput.trim());
-        }
-      });
+      connectBtn.addEventListener('click', triggerJoinRoom);
 
       inputRow.appendChild(codeInput);
       inputRow.appendChild(connectBtn);

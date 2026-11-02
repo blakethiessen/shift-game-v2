@@ -4,6 +4,7 @@
 
 import {
   BoxEntity,
+  DEFAULT_BLOBBY_MAX_HP,
   DIM_HEIGHT_PX,
   DIM_HEIGHT_TILES,
   DIM_WIDTH_PX,
@@ -823,9 +824,21 @@ function applyWeaponHitToBlobbies(
 ): void {
   if (player.attackState.hasDealtKnockback) return;
 
-  for (const blobby of grid.blobbies) {
+  for (let i = 0; i < grid.blobbies.length; i++) {
+    const blobby = grid.blobbies[i];
     if (nextToAndFace(player, blobby.x, blobby.y) !== Direction.None) {
-      knockbackBlobby(grid, blobby, player);
+      const maxHp = blobby.maxHp ?? DEFAULT_BLOBBY_MAX_HP;
+      const currentHp = blobby.hp ?? maxHp;
+      const nextHp = Math.max(0, currentHp - 1);
+      blobby.hp = nextHp;
+      blobby.maxHp = maxHp;
+      blobby.lastHitTick = state.tick;
+
+      if (nextHp <= 0) {
+        grid.blobbies.splice(i, 1);
+      } else {
+        knockbackBlobby(grid, blobby, player);
+      }
       player.attackState.hasDealtKnockback = true;
       emitEvent(state, {
         type: 'playSound',

@@ -141,6 +141,7 @@ export class InputManager implements IInputManager {
 
   private pauseListeners: Array<() => void> = [];
   private muteListeners: Array<() => void> = [];
+  private bindingChangeListeners: Array<() => void> = [];
 
   private readonly boundKeyDown: (e: Event) => void;
   private readonly boundKeyUp: (e: Event) => void;
@@ -607,12 +608,14 @@ export class InputManager implements IInputManager {
     }
     this.saveSettings();
     this.recomputeDirectionalHoldStates();
+    this.bindingChangeListeners.forEach((cb) => cb());
   }
 
   public resetBindings(): void {
     this.settings = createDefaultControlSettings();
     this.saveSettings();
     this.recomputeDirectionalHoldStates();
+    this.bindingChangeListeners.forEach((cb) => cb());
   }
 
   public formatKeyLabel(code: string): string {
@@ -657,6 +660,15 @@ export class InputManager implements IInputManager {
     };
   }
 
+  public onBindingsChange(handler: () => void): () => void {
+    this.bindingChangeListeners.push(handler);
+    return () => {
+      this.bindingChangeListeners = this.bindingChangeListeners.filter(
+        (h) => h !== handler
+      );
+    };
+  }
+
   public destroy(): void {
     this.clearHeldState();
     if (this.target) {
@@ -666,5 +678,6 @@ export class InputManager implements IInputManager {
     }
     this.pauseListeners = [];
     this.muteListeners = [];
+    this.bindingChangeListeners = [];
   }
 }

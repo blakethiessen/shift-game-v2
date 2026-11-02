@@ -40,6 +40,8 @@ export interface MenuCallbacks {
   getCameraZoom?: () => number;
   onWindowScaleModeChange?: (mode: WindowScaleMode) => void;
   getWindowScaleMode?: () => WindowScaleMode;
+  onTestingModeChange?: (enabled: boolean) => void;
+  getTestingMode?: () => boolean;
   onScreenChange?: (screen: MenuScreen) => void;
 }
 
@@ -719,6 +721,38 @@ export class MenuSystem {
     visRow.appendChild(visBtn);
     settingsBox.appendChild(visRow);
 
+    // 3. Multiplayer Testing Mode Toggle (No Darkness + Blobby/Tear HP)
+    const lobbyTestingRow = document.createElement('div');
+    lobbyTestingRow.className = 'setting-row';
+    const lobbyTestingLabel = document.createElement('span');
+    lobbyTestingLabel.textContent = 'Testing Mode:';
+    const lobbyTestingBtn = document.createElement('button');
+    lobbyTestingBtn.type = 'button';
+    lobbyTestingBtn.className = 'action-btn';
+    lobbyTestingBtn.setAttribute('data-testid', 'toggle-testing-mode');
+    lobbyTestingBtn.disabled = this.lobbyTab !== 'host';
+    const isLobbyTestingOn = Boolean(
+      this.callbacks.getTestingMode?.() ?? this.lobbyConfig.testingMode
+    );
+    this.lobbyConfig.testingMode = isLobbyTestingOn;
+    lobbyTestingBtn.textContent = isLobbyTestingOn
+      ? 'On (No Darkness + HP)'
+      : 'Off';
+    lobbyTestingBtn.addEventListener('click', () => {
+      this.audioManager.playSound('menuSelect');
+      const nextTesting = !Boolean(
+        this.callbacks.getTestingMode?.() ?? this.lobbyConfig.testingMode
+      );
+      this.lobbyConfig.testingMode = nextTesting;
+      this.callbacks.onTestingModeChange?.(nextTesting);
+      this.callbacks.onLobbyConfigChange?.(this.getLobbyConfig());
+      this.broadcastLobbySync(false);
+      this.render();
+    });
+    lobbyTestingRow.appendChild(lobbyTestingLabel);
+    lobbyTestingRow.appendChild(lobbyTestingBtn);
+    settingsBox.appendChild(lobbyTestingRow);
+
     grid.appendChild(settingsBox);
     panel.appendChild(grid);
     this.rootEl.appendChild(panel);
@@ -869,6 +903,33 @@ export class MenuSystem {
     localShiftRow.appendChild(localShiftLabel);
     localShiftRow.appendChild(localShiftBtn);
     modeBox.appendChild(localShiftRow);
+
+    const testingRow = document.createElement('div');
+    testingRow.className = 'setting-row';
+    const testingLabel = document.createElement('span');
+    testingLabel.textContent = 'Testing Mode:';
+    const testingBtn = document.createElement('button');
+    testingBtn.type = 'button';
+    testingBtn.className = 'action-btn';
+    testingBtn.setAttribute('data-testid', 'options-testing-mode');
+    const isTestingOn = Boolean(
+      this.callbacks.getTestingMode?.() ?? this.lobbyConfig.testingMode
+    );
+    this.lobbyConfig.testingMode = isTestingOn;
+    testingBtn.textContent = isTestingOn ? 'On' : 'Off';
+    testingBtn.addEventListener('click', () => {
+      this.audioManager.playSound('menuSelect');
+      const nextTesting = !Boolean(
+        this.callbacks.getTestingMode?.() ?? this.lobbyConfig.testingMode
+      );
+      this.lobbyConfig.testingMode = nextTesting;
+      this.callbacks.onTestingModeChange?.(nextTesting);
+      this.callbacks.onLobbyConfigChange?.(this.getLobbyConfig());
+      this.render();
+    });
+    testingRow.appendChild(testingLabel);
+    testingRow.appendChild(testingBtn);
+    modeBox.appendChild(testingRow);
 
     const touchRow = document.createElement('div');
     touchRow.className = 'setting-row';

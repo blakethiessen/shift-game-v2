@@ -223,11 +223,15 @@ export class GameEngine implements IGameEngine {
         world: b.world,
         x: b.x,
         y: b.y,
+        hp: b.hp,
+        maxHp: b.maxHp,
       })),
       ...this.state.room.worlds.dangerous.blobbies.map((b) => ({
         world: b.world,
         x: b.x,
         y: b.y,
+        hp: b.hp,
+        maxHp: b.maxHp,
       })),
     ];
     persist.tears = this.state.room.tears.map((t) => ({

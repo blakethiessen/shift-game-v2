@@ -504,7 +504,7 @@ input[type="range"].retro-slider::-moz-range-thumb {
 
 .shift-zoom-hud {
   position: absolute;
-  top: 8px;
+  top: 6px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 25;
@@ -514,11 +514,13 @@ input[type="range"].retro-slider::-moz-range-thumb {
   width: max-content;
   max-width: calc(100vw - 16px);
   white-space: nowrap;
-  padding: 4px 10px;
-  background: rgba(8, 12, 16, 0.88);
-  border: 1.5px solid rgba(249, 248, 246, 0.65);
-  border-radius: 6px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.85);
+  padding: 5px 10px;
+  background: rgba(5, 7, 8, 0.94);
+  border: 2px solid #F9F8F6;
+  outline: 2px solid #35494F;
+  outline-offset: -5px;
+  border-radius: 0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.92);
   pointer-events: auto;
   user-select: none;
 }
@@ -569,6 +571,174 @@ input[type="range"].retro-slider::-moz-range-thumb {
   width: 90px;
   accent-color: var(--color-highlight);
   cursor: pointer;
+}
+
+/* ============================================================================
+   Edge-of-Screen Controls HUD (Retro Double-Bordered Frame & Pixel Keycaps)
+   ============================================================================ */
+
+.shift-controls-hud {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 24;
+  width: max-content;
+  max-width: calc(100vw - 12px);
+  padding: 3px;
+  background-color: #050708;
+  border: 3px solid #F9F8F6;
+  border-radius: 0;
+  box-shadow:
+    0 0 0 2px #000000,
+    0 6px 20px rgba(0, 0, 0, 0.95);
+  pointer-events: none;
+  user-select: none;
+  image-rendering: pixelated;
+}
+
+.shift-controls-hud.is-hidden {
+  display: none !important;
+}
+
+#ui-overlay:has(.shift-mobile-controls:not(.is-hidden)) .shift-controls-hud {
+  display: none !important;
+}
+
+.controls-hud-inner-frame {
+  border: 2px solid #35494F;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.015) 0px,
+      rgba(255, 255, 255, 0.015) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    rgba(6, 10, 12, 0.96);
+  padding: 4px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 12px;
+}
+
+.controls-hud-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  line-height: 1.1;
+}
+
+.controls-hud-group + .controls-hud-group {
+  padding-left: 12px;
+  border-left: 2px solid #35494F;
+}
+
+.controls-hud-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 3px;
+  border-right: 1px dashed rgba(249, 248, 246, 0.35);
+}
+
+.controls-hud-sprite {
+  width: 25px;
+  height: 25px;
+  display: inline-block;
+  flex-shrink: 0;
+  background-image: url('/images/spritesheet.png');
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  transform: scale(0.84);
+  transform-origin: center center;
+  margin: -3px -2px;
+}
+
+/* Player 1 Idle Down Sprite [col 48, row 52] -> (-1200px, -1300px) */
+.controls-hud-sprite.icon-p1 {
+  background-position: -1200px -1300px;
+}
+
+/* Dimension Tear Stage 3 Rift Sprite [col 14, row 54] -> (-350px, -1350px) */
+.controls-hud-sprite.icon-common {
+  background-position: -350px -1350px;
+}
+
+/* Player 2 Idle Down Sprite [col 35, row 52] -> (-875px, -1300px) */
+.controls-hud-sprite.icon-p2 {
+  background-position: -875px -1300px;
+}
+
+.controls-hud-title {
+  color: #F9F8F6;
+  font-size: 13px;
+  letter-spacing: 1px;
+  text-shadow: 1px 1px 0 #000000;
+}
+
+.controls-hud-group.group-p1 .controls-hud-title {
+  color: #7dd3fc;
+}
+
+.controls-hud-group.group-common .controls-hud-title {
+  color: var(--color-highlight);
+}
+
+.controls-hud-group.group-p2 .controls-hud-title {
+  color: #fca5a5;
+}
+
+.controls-hud-items {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.controls-hud-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.controls-hud-action {
+  color: var(--color-muted);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  text-shadow: 1px 1px 0 #000000;
+}
+
+.controls-hud-key {
+  display: inline-block;
+  background: #141d22;
+  border-top: 1.5px solid #F9F8F6;
+  border-left: 1.5px solid #F9F8F6;
+  border-right: 1.5px solid #35494F;
+  border-bottom: 1.5px solid #35494F;
+  box-shadow: 0 2px 0 #000000;
+  border-radius: 0;
+  color: var(--color-highlight);
+  font-family: var(--font-retro);
+  font-size: 12px;
+  padding: 1px 5px;
+  line-height: 1.05;
+  letter-spacing: 0.5px;
+  text-shadow: 1px 1px 0 #000000;
+  transform: translateY(-1px);
+}
+
+.controls-hud-key.is-shift-key {
+  background: #280a0c;
+  border-top-color: #ffd166;
+  border-left-color: #ffd166;
+  border-right-color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+  color: #ffffff;
 }
 
 /* ============================================================================

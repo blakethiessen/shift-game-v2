@@ -43,6 +43,7 @@ import { MenuSystem } from './ui/menuSystem';
 
 export const CAMERA_ZOOM_STORAGE_KEY = 'shift_game_camera_zoom_v1';
 export const WINDOW_SCALE_STORAGE_KEY = 'shift_game_window_scale_v1';
+export const TESTING_MODE_STORAGE_KEY = 'shift_game_testing_mode_v1';
 
 export interface ShiftGameAppOptions {
   container: HTMLElement;
@@ -77,6 +78,7 @@ export class ShiftGameApp {
   private localPlayerId: PlayerId = 1;
   private lobbyConfig: LobbyConfig = createDefaultLobbyConfig();
   private lightingEnabled = true;
+  private testingMode = false;
   private cameraZoom: number = DEFAULT_CAMERA_ZOOM;
   private windowScaleMode: WindowScaleMode = DEFAULT_WINDOW_SCALE_MODE;
   private running = false;
@@ -87,6 +89,7 @@ export class ShiftGameApp {
   private zoomHudSliderEl: HTMLInputElement | null = null;
   private zoomHudValueEl: HTMLButtonElement | null = null;
   private zoomHudScaleBtnEl: HTMLButtonElement | null = null;
+  private controlsHudEl: HTMLElement | null = null;
 
   private accumulatorMs = 0;
   private lastFrameTimestamp = 0;
@@ -123,6 +126,9 @@ export class ShiftGameApp {
 
     this.cameraZoom = this.loadInitialCameraZoom();
     this.windowScaleMode = this.loadInitialWindowScaleMode();
+    this.testingMode = this.loadInitialTestingMode();
+    this.lobbyConfig.testingMode = this.testingMode;
+    this.engine.setLobbyConfig(this.lobbyConfig);
 
     this.mobileControls = new MobileControls({
       container: this.container,
@@ -144,6 +150,14 @@ export class ShiftGameApp {
     this.mobileControls.setZoomDisplay(this.cameraZoom);
 
     this.createZoomHud();
+    this.createControlsHud();
+
+    this.inputManager.onBindingsChange(() => {
+      this.syncControlsHudDisplay();
+      if (this.running) {
+        this.renderCurrentState(0);
+      }
+    });
 
     this.inputManager.onMuteToggle(() => {
       this.audioManager.toggleMute();
@@ -230,8 +244,18 @@ export class ShiftGameApp {
         onReturnToTitle: () => this.returnToTitle(),
         onLobbyConfigChange: (config) => {
           this.lobbyConfig = { ...config };
+          if (config.testingMode !== undefined) {
+            this.testingMode = Boolean(config.testingMode);
+            this.saveTestingMode(this.testingMode);
+          } else {
+            this.lobbyConfig.testingMode = this.testingMode;
+          }
           this.engine.setLobbyConfig(this.lobbyConfig);
         },
+        onTestingModeChange: (enabled) => {
+          this.setTestingMode(enabled);
+        },
+        getTestingMode: () => this.getTestingMode(),
         onMobileControlsChange: (forceEnabled) => {
           this.mobileControls.setForceEnabled(forceEnabled);
           this.updateZoomHudVisibility();
@@ -296,6 +320,53 @@ export class ShiftGameApp {
 
   public getWindowScaleMode(): WindowScaleMode {
     return this.windowScaleMode;
+  }
+
+  public getTestingMode(): boolean {
+    return Boolean(this.testingMode || this.lobbyConfig.testingMode);
+  }
+
+  public setTestingMode(enabled: boolean): void {
+    this.testingMode = Boolean(enabled);
+    this.lobbyConfig.testingMode = this.testingMode;
+    this.saveTestingMode(this.testingMode);
+    this.engine.setLobbyConfig(this.lobbyConfig);
+    if (this.running) {
+      this.renderCurrentState(0);
+    }
+  }
+
+  private loadInitialTestingMode(): boolean {
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const params = new URLSearchParams(window.location.search);
+      const urlTesting = params.get('testing');
+      if (urlTesting === '1' || urlTesting === 'true') {
+        return true;
+      }
+      if (urlTesting === '0' || urlTesting === 'false') {
+        return false;
+      }
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const saved = localStorage.getItem(TESTING_MODE_STORAGE_KEY);
+        if (saved === 'true' || saved === '1') {
+          return true;
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
+    return false;
+  }
+
+  private saveTestingMode(enabled: boolean): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(TESTING_MODE_STORAGE_KEY, String(enabled));
+    } catch {
+      // Ignore storage errors
+    }
   }
 
   public setWindowScaleMode(mode: WindowScaleMode): void {
@@ -651,13 +722,131 @@ export class ShiftGameApp {
   }
 
   private updateZoomHudVisibility(): void {
-    if (!this.zoomHudEl) return;
     const state = this.engine.getState();
     const inActivePlay =
       this.running &&
       state.phase !== 'gameOver' &&
       state.phase !== 'victory';
-    this.zoomHudEl.classList.toggle('is-hidden', !inActivePlay);
+    if (this.zoomHudEl) {
+      this.zoomHudEl.classList.toggle('is-hidden', !inActivePlay);
+    }
+    if (this.controlsHudEl) {
+      this.controlsHudEl.classList.toggle('is-hidden', !inActivePlay);
+      if (inActivePlay) {
+        this.syncControlsHudDisplay();
+      }
+    }
+  }
+
+  private createControlsHud(): void {
+    const bar = document.createElement('div');
+    bar.className = 'shift-controls-hud is-hidden';
+    bar.setAttribute('data-testid', 'shift-controls-hud');
+    bar.setAttribute('aria-label', 'Game Controls Reference');
+
+    this.container.appendChild(bar);
+    this.controlsHudEl = bar;
+    this.syncControlsHudDisplay();
+  }
+
+  private syncControlsHudDisplay(): void {
+    if (!this.controlsHudEl) return;
+    const keys = this.inputManager.getFormattedKeyStrings();
+    this.controlsHudEl.innerHTML = '';
+
+    const innerFrame = document.createElement('div');
+    innerFrame.className = 'controls-hud-inner-frame';
+
+    const makeGroup = (
+      title: string,
+      testId: string,
+      iconKind: 'p1' | 'p2' | 'common',
+      entries: Array<{ label: string; key: string; isShift?: boolean }>
+    ): HTMLElement => {
+      const group = document.createElement('div');
+      group.className = `controls-hud-group group-${iconKind}`;
+      group.setAttribute('data-testid', testId);
+
+      const header = document.createElement('div');
+      header.className = 'controls-hud-header';
+
+      const iconEl = document.createElement('span');
+      iconEl.className = `controls-hud-sprite icon-${iconKind}`;
+      iconEl.setAttribute('data-testid', `controls-hud-icon-${iconKind}`);
+      iconEl.setAttribute('aria-hidden', 'true');
+      header.appendChild(iconEl);
+
+      const titleEl = document.createElement('span');
+      titleEl.className = 'controls-hud-title';
+      titleEl.textContent = title;
+      header.appendChild(titleEl);
+      group.appendChild(header);
+
+      const itemsWrap = document.createElement('div');
+      itemsWrap.className = 'controls-hud-items';
+
+      for (const entry of entries) {
+        const item = document.createElement('span');
+        item.className = 'controls-hud-item';
+        const lbl = document.createElement('span');
+        lbl.className = 'controls-hud-action';
+        lbl.textContent = entry.label;
+        const kbd = document.createElement('kbd');
+        kbd.className = entry.isShift
+          ? 'controls-hud-key is-shift-key'
+          : 'controls-hud-key';
+        kbd.textContent = entry.key;
+        item.appendChild(lbl);
+        item.appendChild(kbd);
+        itemsWrap.appendChild(item);
+      }
+      group.appendChild(itemsWrap);
+      return group;
+    };
+
+    const p1Move = `${keys.p1.Up}/${keys.p1.Left}/${keys.p1.Down}/${keys.p1.Right}`;
+    const p1Entries = [
+      { label: 'MOVE', key: p1Move },
+      { label: 'USE', key: keys.p1.UseItem },
+      { label: 'ACT', key: keys.p1.Interact },
+      { label: 'INV', key: keys.p1.Inventory },
+      { label: 'PING', key: keys.p1.Ping },
+    ];
+
+    const commonEntries = [
+      { label: 'SHIFT', key: keys.common.SwitchDimensions, isShift: true },
+      { label: 'PAUSE', key: keys.common.Pause },
+      { label: 'MUTE', key: keys.common.Mute },
+    ];
+
+    if (this.mode === 'online') {
+      innerFrame.appendChild(
+        makeGroup('PLAYER', 'controls-hud-p1', 'p1', p1Entries)
+      );
+      innerFrame.appendChild(
+        makeGroup('DIMENSION', 'controls-hud-common', 'common', commonEntries)
+      );
+    } else {
+      const p2Move = `${keys.p2.Up}/${keys.p2.Left}/${keys.p2.Down}/${keys.p2.Right}`;
+      const p2Entries = [
+        { label: 'MOVE', key: p2Move },
+        { label: 'USE', key: keys.p2.UseItem },
+        { label: 'ACT', key: keys.p2.Interact },
+        { label: 'INV', key: keys.p2.Inventory },
+        { label: 'PING', key: keys.p2.Ping },
+      ];
+      innerFrame.appendChild(
+        makeGroup('P1', 'controls-hud-p1', 'p1', p1Entries)
+      );
+      innerFrame.appendChild(
+        makeGroup('SHIFT', 'controls-hud-common', 'common', commonEntries)
+      );
+      innerFrame.appendChild(
+        makeGroup('P2', 'controls-hud-p2', 'p2', p2Entries)
+      );
+    }
+
+    this.controlsHudEl.appendChild(innerFrame);
   }
 
   public getLocalPlayerId(): PlayerId {
@@ -675,9 +864,13 @@ export class ShiftGameApp {
     this.localPlayerId = 1;
     this.lobbyConfig = {
       ...createDefaultLobbyConfig(),
+      testingMode: this.testingMode,
       ...config,
       mode: 'local',
     };
+    if (this.lobbyConfig.testingMode !== undefined) {
+      this.testingMode = Boolean(this.lobbyConfig.testingMode);
+    }
 
     this.eventDeduplicator.reset();
     this.clientInputTracker.reset();
@@ -703,7 +896,12 @@ export class ShiftGameApp {
     this.mode = 'online';
     this.isOnlineHost = isHost;
     this.localPlayerId = isHost ? 1 : 2;
-    this.lobbyConfig = { ...config, mode: 'online' };
+    this.lobbyConfig = {
+      ...config,
+      testingMode: config.testingMode ?? this.testingMode,
+      mode: 'online',
+    };
+    this.testingMode = Boolean(this.lobbyConfig.testingMode);
 
     this.eventDeduplicator.reset();
     this.clientInputTracker.reset();
@@ -890,13 +1088,19 @@ export class ShiftGameApp {
           },
         }
       : formattedKeys;
+    const effectiveTestingMode = Boolean(
+      this.testingMode ||
+        this.lobbyConfig.testingMode ||
+        state.lobbyConfig?.testingMode
+    );
     this.renderer.render(
       state,
       {
         localPlayerId: this.localPlayerId,
         mode: this.mode,
         partnerVisibility: this.lobbyConfig.partnerVisibility,
-        lightingEnabled: this.lightingEnabled,
+        lightingEnabled: this.lightingEnabled && !effectiveTestingMode,
+        testingMode: effectiveTestingMode,
         cameraZoom: this.cameraZoom,
         keyStrings,
       },
@@ -937,6 +1141,7 @@ export class ShiftGameApp {
       window.removeEventListener('resize', this.boundWindowResize);
     }
     this.zoomHudEl?.remove();
+    this.controlsHudEl?.remove();
     this.mobileControls.destroy();
     this.inputManager.destroy();
     this.menuSystem.destroy();

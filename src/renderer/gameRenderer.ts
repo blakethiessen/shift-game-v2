@@ -26,6 +26,8 @@ import {
   WindowStageLayout,
   WorldGridState,
   WorldType,
+  getBlobbyHealth,
+  getDimensionTearHealth,
   getWorldForSide,
 } from '../shared/types';
 import {
@@ -476,6 +478,10 @@ export class GameRenderer implements IGameRenderer {
     }
 
     const requestedZoom = options.cameraZoom ?? DEFAULT_CAMERA_ZOOM;
+    const effectiveTestingMode = Boolean(
+      options.testingMode || state.lobbyConfig?.testingMode
+    );
+    const effectiveLighting = options.lightingEnabled && !effectiveTestingMode;
 
     if (options.mode === 'local') {
       // Local Mode: 1000x650 Dual Viewport (Left @ 0..500, Right @ 500..1000)
@@ -502,9 +508,10 @@ export class GameRenderer implements IGameRenderer {
           leftPlayer,
           rightPlayer,
           drawOffsetX,
-          options
+          options,
+          effectiveTestingMode
         );
-        if (options.lightingEnabled) {
+        if (effectiveLighting) {
           this.lightingRenderer.renderDimensionLighting(
             ctx,
             {
@@ -541,9 +548,10 @@ export class GameRenderer implements IGameRenderer {
           rightPlayer,
           leftPlayer,
           drawOffsetX,
-          options
+          options,
+          effectiveTestingMode
         );
-        if (options.lightingEnabled) {
+        if (effectiveLighting) {
           this.lightingRenderer.renderDimensionLighting(
             ctx,
             {
@@ -619,7 +627,8 @@ export class GameRenderer implements IGameRenderer {
           localPlayer,
           partnerPlayer,
           drawOffsetX,
-          options
+          options,
+          effectiveTestingMode
         );
 
         if (convergenceAlpha > 0) {
@@ -629,13 +638,14 @@ export class GameRenderer implements IGameRenderer {
             state,
             partnerSide,
             partnerPlayer,
-            drawOffsetX
+            drawOffsetX,
+            effectiveTestingMode
           );
           this.drawPlayerEntity(partnerPlayer, drawOffsetX, state);
           ctx.restore();
         }
 
-        if (options.lightingEnabled) {
+        if (effectiveLighting) {
           this.lightingRenderer.renderDimensionLighting(
             ctx,
             {
@@ -744,14 +754,21 @@ export class GameRenderer implements IGameRenderer {
     player: PlayerState,
     partner: PlayerState,
     offsetX: number,
-    options: RenderOptions
+    options: RenderOptions,
+    testingMode: boolean = false
   ): void {
     this.ctx.save();
     this.ctx.beginPath();
     this.ctx.rect(offsetX, 0, DIM_WIDTH_PX, DIM_HEIGHT_PX);
     this.ctx.clip();
 
-    this.renderDimensionWorldAndEntities(state, side, player, offsetX);
+    this.renderDimensionWorldAndEntities(
+      state,
+      side,
+      player,
+      offsetX,
+      testingMode
+    );
 
     // Partner Echo in Online Mode when partnerVisibility === 'echo'
     if (options.mode === 'online' && options.partnerVisibility === 'echo') {
@@ -768,7 +785,8 @@ export class GameRenderer implements IGameRenderer {
     state: GameState,
     side: DimensionSide,
     player: PlayerState,
-    offsetX: number
+    offsetX: number,
+    testingMode: boolean = false
   ): void {
     const worldType: WorldType = getWorldForSide(side, state.evilOnLeft);
     const oppositeWorldType: WorldType =
@@ -953,6 +971,63 @@ export class GameRenderer implements IGameRenderer {
         anim.flipX
       );
     }
+
+    // 11. Testing Mode Health Overlays (Blobbies & Dimension Tears)
+    if (testingMode) {
+      for (const tear of state.room.tears) {
+        const { hp, maxHp } = getDimensionTearHealth(tear);
+        const recentlyHit =
+          tear.lastHitTick !== undefined && state.tick - tear.lastHitTick <= 45;
+        this.renderEntityHealthBar(
+          offsetX + tear.x,
+          tear.y,
+          hp,
+          maxHp,
+          recentlyHit ? '#facc15' : '#a855f7'
+        );
+      }
+
+      for (const blobby of worldGrid.blobbies) {
+        const { hp, maxHp } = getBlobbyHealth(blobby);
+        const recentlyHit =
+          blobby.lastHitTick !== undefined &&
+          state.tick - blobby.lastHitTick <= 45;
+        this.renderEntityHealthBar(
+          offsetX + blobby.x,
+          blobby.y,
+          hp,
+          maxHp,
+          recentlyHit ? '#facc15' : '#22c55e'
+        );
+      }
+    }
+  }
+
+  private renderEntityHealthBar(
+    entityX: number,
+    entityY: number,
+    hp: number,
+    maxHp: number,
+    fillColor: string
+  ): void {
+    const barW = 28;
+    const barH = 5;
+    const barX = entityX + (TILE_SIZE_PX - barW) / 2;
+    const barY = Math.max(12, entityY - 8);
+    const ratio = maxHp > 0 ? Math.max(0, Math.min(1, hp / maxHp)) : 0;
+
+    this.ctx.save();
+    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    this.ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+    this.ctx.fillStyle = fillColor;
+    this.ctx.fillRect(barX, barY, Math.round(barW * ratio), barH);
+
+    this.ctx.font = 'bold 9px monospace';
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillStyle = '#ffffff';
+    this.ctx.fillText(`HP ${hp}/${maxHp}`, entityX + TILE_SIZE_PX / 2, barY - 1);
+    this.ctx.restore();
   }
 
   private renderSynthesizedGhostWall(

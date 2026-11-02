@@ -244,6 +244,23 @@ describe('playerAndItems & pathfinding', () => {
     // Advance 500ms so swing finishes and resets active = false
     engine.tick(500, p1In, createDefaultPlayerInput());
     expect(state.players[0].attackState.active).toBe(false);
+
+    // Hit blobby-near two more times (3 hits total) -> reduces HP from 3 -> 2 -> 1 -> 0 and defeats it
+    state.room.worlds.neutral.blobbies[0].x = 225;
+    state.room.worlds.neutral.blobbies[0].y = 300;
+    state.players[0].direction = Direction.Right;
+    p1In.useItemSeq = 2;
+    engine.tick(16.67, p1In, createDefaultPlayerInput());
+    expect(state.room.worlds.neutral.blobbies[0].hp).toBe(1);
+    engine.tick(500, p1In, createDefaultPlayerInput());
+
+    state.room.worlds.neutral.blobbies[0].x = 225;
+    state.room.worlds.neutral.blobbies[0].y = 300;
+    p1In.useItemSeq = 3;
+    engine.tick(16.67, p1In, createDefaultPlayerInput());
+    expect(
+      state.room.worlds.neutral.blobbies.find((b) => b.id === 'blobby-near')
+    ).toBeUndefined();
   });
 
   it('heals player when eating food items and consumes the food', () => {

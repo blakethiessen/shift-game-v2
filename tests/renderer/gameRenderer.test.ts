@@ -993,5 +993,96 @@ describe('gameRenderer', () => {
       expect(canvas.width).toBe(1000);
       expect(canvas.height).toBe(650);
     });
+
+    it('disables darkness and renders Blobby and Dimension Tear health bars/HP text when testingMode is enabled', () => {
+      const { canvas, ctx } = createMockCanvasAndCtx();
+      const offscreenCanvases: ReturnType<typeof createMockCanvasAndCtx>[] = [];
+      const offscreenFactory = () => {
+        const mock = createMockCanvasAndCtx();
+        offscreenCanvases.push(mock);
+        return mock.canvas;
+      };
+      const renderer = new GameRenderer(
+        canvas,
+        {} as CanvasImageSource,
+        offscreenFactory
+      );
+
+      const state = createMockGameState();
+      state.room.tears.push({
+        id: 'tear-test-1',
+        x: 150,
+        y: 200,
+        angle: Direction.Horizontal,
+        stage: 2, // 3/5 HP
+        growthTimerMs: 3000,
+        hasSpread: false,
+        lastHitTick: 9,
+      });
+      state.room.worlds.neutral.blobbies.push({
+        id: 'blobby-test-1',
+        world: 'neutral',
+        x: 250,
+        y: 300,
+        velocity: { x: 0, y: 0 },
+        direction: Direction.Down,
+        state: 'Wandering',
+        currentSpeed: 0.8,
+        wanderTimerTicks: 0,
+        wanderIntervalTicks: 40,
+        eatingTimerTicks: 0,
+        path: [],
+        nextStepIdx: 0,
+        nextStep: null,
+        oldTargetCoord: { x: 0, y: 0 },
+        hp: 2,
+        maxHp: 3,
+        lastHitTick: 10,
+      });
+
+      // Render with testingMode: false -> no entity health labels drawn
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'local',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+          testingMode: false,
+        },
+        16.67
+      );
+      const textsWithoutTesting = ctx.fillTextCalls.map((c) => c.text).join(' | ');
+      expect(textsWithoutTesting).not.toContain('3/5');
+      expect(textsWithoutTesting).not.toContain('2/3');
+
+      // Render with testingMode: true (even if lightingEnabled: true is passed)
+      ctx.fillTextCalls.length = 0;
+      for (const off of offscreenCanvases) {
+        off.ctx.fillRect.mockClear();
+      }
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'local',
+          partnerVisibility: 'strict',
+          lightingEnabled: true,
+          testingMode: true,
+        },
+        16.67
+      );
+
+      // Lighting offscreen canvases must NOT be filled when testingMode is true (darkness disabled)
+      const offscreenFillCalls = offscreenCanvases.reduce(
+        (sum, c) => sum + c.ctx.fillRect.mock.calls.length,
+        0
+      );
+      expect(offscreenFillCalls).toBe(0);
+
+      const textsWithTesting = ctx.fillTextCalls.map((c) => c.text).join(' | ');
+      expect(textsWithTesting).toContain('3/5');
+      expect(textsWithTesting).toContain('2/3');
+    });
   });
 });

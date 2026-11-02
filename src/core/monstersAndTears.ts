@@ -4,6 +4,7 @@
 
 import {
   BlobbyEntity,
+  DEFAULT_BLOBBY_MAX_HP,
   DIM_HEIGHT_TILES,
   DIM_WIDTH_TILES,
   DimensionTearEntity,
@@ -522,6 +523,7 @@ export function spreadTear(state: GameState, tear: DimensionTearEntity): void {
 }
 
 export function shrinkTear(state: GameState, tear: DimensionTearEntity): void {
+  tear.lastHitTick = state.tick;
   if (tear.stage > 0) {
     tear.stage--;
     tear.growthTimerMs = TEAR_GROWTH_MS;
@@ -841,6 +843,8 @@ export function updateMonstersAndTears(
             nextStepIdx: 0,
             nextStep: null,
             oldTargetCoord: { x: 0, y: 0 },
+            hp: DEFAULT_BLOBBY_MAX_HP,
+            maxHp: DEFAULT_BLOBBY_MAX_HP,
           });
         }
       }

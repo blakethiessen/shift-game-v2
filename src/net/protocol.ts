@@ -417,7 +417,9 @@ export function isValidLobbyConfig(value: unknown): value is LobbyConfig {
   const validVis = value.partnerVisibility === 'strict' || value.partnerVisibility === 'echo';
   const validShift = value.shiftMode === 'cooperative' || value.shiftMode === 'individual';
   const validAudio = typeof value.muffledCrossDimensionAudio === 'boolean';
-  return validMode && validVis && validShift && validAudio;
+  const validTesting =
+    value.testingMode === undefined || typeof value.testingMode === 'boolean';
+  return validMode && validVis && validShift && validAudio && validTesting;
 }
 
 export function isValidNetPacket(value: unknown): value is NetPacket {

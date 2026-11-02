@@ -467,4 +467,107 @@ describe('ShiftGameApp End-to-End Integration', () => {
 
     app.destroy();
   });
+
+  it('supports Multiplayer Testing Mode (no darkness + Blobby/Tear HP display) and edge Controls HUD matching menu bindings', () => {
+    const container = document.createElement('div');
+    const canvas = createMockCanvas();
+    container.appendChild(canvas);
+    document.body.appendChild(container);
+
+    const app = new ShiftGameApp({
+      container,
+      canvas,
+      canvasFactory: () => createMockCanvas(),
+      autoStartLoop: false,
+      mobileControlsEnabled: false,
+    });
+
+    // Enable Multiplayer Testing Mode in Options menu and rebind P1 Interact to KeyF & Common SwitchDimensions to Space
+    app.getMenuSystem().showScreen('options');
+    const testingToggleBtn = container.querySelector(
+      '[data-testid="options-testing-mode"]'
+    ) as HTMLButtonElement;
+    expect(testingToggleBtn).toBeTruthy();
+    testingToggleBtn.click();
+    expect(app.getTestingMode()).toBe(true);
+
+    const p1InteractBtn = container.querySelector(
+      '[data-binding="p1.Interact"]'
+    ) as HTMLButtonElement;
+    p1InteractBtn.click();
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyF' }));
+
+    const shiftBindBtn = container.querySelector(
+      '[data-binding="common.SwitchDimensions"]'
+    ) as HTMLButtonElement;
+    shiftBindBtn.click();
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
+
+    // Start local game
+    app.startLocalGame(app.getMenuSystem().getLobbyConfig());
+
+    // Controls HUD on the edge of the screen must be visible, use the retro double-bordered frame & spritesheet icons, and reflect the rebound keys ('F' and 'SPACE')
+    const controlsHud = container.querySelector(
+      '[data-testid="shift-controls-hud"]'
+    ) as HTMLElement;
+    expect(controlsHud).toBeTruthy();
+    expect(controlsHud.classList.contains('is-hidden')).toBe(false);
+    expect(controlsHud.querySelector('.controls-hud-inner-frame')).toBeTruthy();
+    expect(
+      controlsHud.querySelector('[data-testid="controls-hud-icon-p1"]')
+    ).toBeTruthy();
+    expect(
+      controlsHud.querySelector('[data-testid="controls-hud-icon-common"]')
+    ).toBeTruthy();
+    expect(
+      controlsHud.querySelector('[data-testid="controls-hud-icon-p2"]')
+    ).toBeTruthy();
+    expect(controlsHud.textContent).toContain('F');
+    expect(controlsHud.textContent).toContain('SPACE');
+
+    // Updating a binding dynamically also updates the Controls HUD immediately
+    app.getMenuSystem()['inputManager'].updateBinding('p2', 'UseItem', 'KeyK');
+    expect(controlsHud.textContent).toContain('K');
+
+    // Place a Blobby and a Dimension Tear in spawnRoom and verify their HP is drawn in Testing Mode
+    const state = app.getState();
+    state.room.tears.push({
+      id: 'test-tear-hud',
+      x: 200,
+      y: 250,
+      angle: 9,
+      stage: 3, // 4/5 HP
+      growthTimerMs: 3000,
+      hasSpread: false,
+    });
+    state.room.worlds.neutral.blobbies.push({
+      id: 'test-blobby-hud',
+      world: 'neutral',
+      x: 250,
+      y: 250,
+      velocity: { x: 0, y: 0 },
+      direction: 7,
+      state: 'Wandering',
+      currentSpeed: 0.8,
+      wanderTimerTicks: 0,
+      wanderIntervalTicks: 40,
+      eatingTimerTicks: 0,
+      path: [],
+      nextStepIdx: 0,
+      nextStep: null,
+      oldTargetCoord: { x: 0, y: 0 },
+      hp: 2,
+      maxHp: 3,
+    });
+
+    const ctx = canvas.getContext('2d') as any;
+    ctx.fillText.mockClear();
+    app.stepFrame(SIMULATION_TICK_MS);
+
+    const renderedTexts = ctx.fillText.mock.calls.map((c: unknown[]) => c[0]).join(' | ');
+    expect(renderedTexts).toContain('4/5');
+    expect(renderedTexts).toContain('2/3');
+
+    app.destroy();
+  });
 });

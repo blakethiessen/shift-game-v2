@@ -281,6 +281,56 @@ describe('MenuSystem', () => {
     expect(onWindowScaleModeChange).toHaveBeenCalledWith('fit');
   });
 
+  it('renders Multiplayer Testing Mode toggle in Options and Online Lobby screens and syncs LobbyConfig', () => {
+    let testingMode = false;
+    const onTestingModeChange = vi.fn((enabled: boolean) => {
+      testingMode = enabled;
+    });
+    const onLobbyConfigChange = vi.fn();
+
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: peer,
+      callbacks: {
+        getTestingMode: () => testingMode,
+        onTestingModeChange,
+        onLobbyConfigChange,
+      },
+    });
+    menu.showScreen('options');
+
+    const testingBtn = container.querySelector(
+      '[data-testid="options-testing-mode"]'
+    ) as HTMLButtonElement;
+    expect(testingBtn).toBeTruthy();
+    expect(testingBtn.textContent).toBe('Off');
+
+    testingBtn.click();
+    expect(onTestingModeChange).toHaveBeenCalledWith(true);
+    expect(menu.getLobbyConfig().testingMode).toBe(true);
+    expect(onLobbyConfigChange).toHaveBeenCalledWith(
+      expect.objectContaining({ testingMode: true })
+    );
+    expect(
+      (container.querySelector('[data-testid="options-testing-mode"]') as HTMLButtonElement)
+        .textContent
+    ).toBe('On');
+
+    // Open Online Lobby -> Host can also toggle Testing Mode there
+    menu.showScreen('lobby');
+    const lobbyTestingBtn = container.querySelector(
+      '[data-testid="toggle-testing-mode"]'
+    ) as HTMLButtonElement;
+    expect(lobbyTestingBtn).toBeTruthy();
+    expect(lobbyTestingBtn.textContent).toContain('On');
+
+    lobbyTestingBtn.click();
+    expect(onTestingModeChange).toHaveBeenCalledWith(false);
+    expect(menu.getLobbyConfig().testingMode).toBe(false);
+  });
+
   it('renders Tutorial Screen with formatted keybindings from InputManager and starts game on key press', () => {
     const onStartLocal = vi.fn();
     input.updateBinding('p1', 'Interact', 'KeyG');

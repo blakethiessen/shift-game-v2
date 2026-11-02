@@ -9,6 +9,7 @@ import {
   BookKind,
   BoxEntity,
   ChestEntity,
+  DEFAULT_BLOBBY_MAX_HP,
   DIM_HEIGHT_TILES,
   DIM_WIDTH_TILES,
   Direction,
@@ -616,6 +617,8 @@ export function parseRoom(
           nextStepIdx: 0,
           nextStep: null,
           oldTargetCoord: { x: 0, y: 0 },
+          hp: DEFAULT_BLOBBY_MAX_HP,
+          maxHp: DEFAULT_BLOBBY_MAX_HP,
         });
         continue;
       }
@@ -870,6 +873,8 @@ export function applyRoomPersistence(
         nextStepIdx: 0,
         nextStep: null,
         oldTargetCoord: { x: 0, y: 0 },
+        hp: b.hp ?? DEFAULT_BLOBBY_MAX_HP,
+        maxHp: b.maxHp ?? DEFAULT_BLOBBY_MAX_HP,
       });
     }
   }

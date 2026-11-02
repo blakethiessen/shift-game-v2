@@ -275,6 +275,9 @@ export interface ItemEntity {
 
 export type BlobbyState = 'Wandering' | 'Seeking' | 'Shocking' | 'Eating';
 
+export const DEFAULT_BLOBBY_MAX_HP = 3;
+export const MAX_TEAR_HP = 5;
+
 export interface BlobbyEntity {
   id: string;
   world: WorldType;
@@ -291,6 +294,9 @@ export interface BlobbyEntity {
   nextStepIdx: number;
   nextStep: TileCoord | null;
   oldTargetCoord: TileCoord;
+  hp?: number;
+  maxHp?: number;
+  lastHitTick?: number;
 }
 
 export interface DimensionTearEntity {
@@ -302,6 +308,7 @@ export interface DimensionTearEntity {
   stage: number; // 0..4
   growthTimerMs: number;
   hasSpread: boolean;
+  lastHitTick?: number;
 }
 
 export interface RegrowthPendingTear {
@@ -383,6 +390,8 @@ export interface PersistedBlobbyRecord {
   world: WorldType;
   x: number;
   y: number;
+  hp?: number;
+  maxHp?: number;
 }
 
 export interface PersistedTearRecord {
@@ -527,6 +536,7 @@ export interface LobbyConfig {
   partnerVisibility: PartnerVisibilityMode;
   shiftMode: ShiftMode;
   muffledCrossDimensionAudio: boolean;
+  testingMode?: boolean;
 }
 
 export interface GameState {
@@ -645,6 +655,7 @@ export interface RenderOptions {
   mode: PlayMode;
   partnerVisibility: PartnerVisibilityMode;
   lightingEnabled: boolean;
+  testingMode?: boolean;
   cameraZoom?: number;
   keyStrings?: {
     p1: PlayerKeyBindings;
@@ -809,7 +820,24 @@ export function createDefaultLobbyConfig(): LobbyConfig {
     partnerVisibility: 'strict',
     shiftMode: 'cooperative',
     muffledCrossDimensionAudio: true,
+    testingMode: false,
   };
+}
+
+export function getBlobbyHealth(
+  blobby: Pick<BlobbyEntity, 'hp' | 'maxHp'>
+): { hp: number; maxHp: number } {
+  const maxHp = Math.max(1, blobby.maxHp ?? DEFAULT_BLOBBY_MAX_HP);
+  const hp = Math.max(0, Math.min(maxHp, blobby.hp ?? maxHp));
+  return { hp, maxHp };
+}
+
+export function getDimensionTearHealth(
+  tear: Pick<DimensionTearEntity, 'stage'>
+): { hp: number; maxHp: number } {
+  const maxHp = MAX_TEAR_HP;
+  const hp = Math.max(1, Math.min(maxHp, tear.stage + 1));
+  return { hp, maxHp };
 }
 
 /**

@@ -21,7 +21,9 @@ export const SPRITESHEET_HEIGHT = 1525;
 export const SPRITESHEET_COLS = 77;
 export const EVIL_WORLD_COL_OFFSET = 7;
 export const P2_WALK_COL_OFFSET = -13;
-export const P2_ACTION_COL_OFFSET = 24;
+export const ACTION_BASE_COL = 54;
+export const P2_ACTION_COL_OFFSET = 0;
+export const P2_ACTION_ROW_OFFSET = 21;
 
 export interface SpriteRect {
   x: number;
@@ -228,9 +230,9 @@ export const HEALTH_ACTION_COL_OFFSETS: Record<HealthState, number> = {
 };
 
 export const WEAPON_ROW_OFFSETS: Record<WeaponType, number> = {
-  Broom: 22,
-  Plunger: 29,
-  FryingPan: 36,
+  Broom: 1,
+  Plunger: 8,
+  FryingPan: 15,
 };
 
 interface RawRangeAnim {
@@ -396,6 +398,13 @@ function directionToCardinalActionKey(direction: Direction): CardinalActionKey {
   }
 }
 
+const CARDINAL_ACTION_DIRECTIONS: Record<CardinalActionKey, Direction> = {
+  left: Direction.Left,
+  right: Direction.Right,
+  up: Direction.Up,
+  down: Direction.Down,
+};
+
 export function getWeaponSwingFrames(
   playerId: PlayerId,
   weapon: WeaponType,
@@ -403,10 +412,11 @@ export function getWeaponSwingFrames(
   healthState: HealthState
 ): WeaponSwingFrames {
   const dirKey = directionToCardinalActionKey(direction);
+  const cardinalDirection = CARDINAL_ACTION_DIRECTIONS[dirKey];
   const weaponRowOffset = WEAPON_ROW_OFFSETS[weapon];
   const stateColOffset = HEALTH_ACTION_COL_OFFSETS[healthState];
-  const stateRowOffset = HEALTH_WALK_ROW_OFFSETS[healthState];
   const playerColOffset = playerId === 2 ? P2_ACTION_COL_OFFSET : 0;
+  const playerRowOffset = playerId === 2 ? P2_ACTION_ROW_OFFSET : 0;
 
   const result = {} as WeaponSwingFrames;
   const tileKeys: WeaponSwingTileKey[] = [
@@ -421,24 +431,20 @@ export function getWeaponSwingFrames(
     const rawFrames = BASE_ACTION_FRAMES[tileKey][dirKey];
     const mapped: SpriteRect[] = rawFrames.map(([baseCol, baseRow], idx) => {
       const isLastFrame = idx === rawFrames.length - 1;
-      let col = baseCol;
-      let row = baseRow;
 
-      if (tileKey === 'playerTile') {
-        if (!isLastFrame) {
-          col += stateColOffset;
-          row += weaponRowOffset;
-        } else {
-          // Final recovery frame uses row 12..15 based on health state (except 'up' which stays 12)
-          row = dirKey === 'up' ? 12 : 12 + stateRowOffset;
-        }
-      } else {
-        if (!isLastFrame) {
-          row += weaponRowOffset;
-        }
+      if (tileKey === 'playerTile' && isLastFrame) {
+        return getPlayerIdleSpriteRect(playerId, cardinalDirection, healthState);
       }
 
-      col += playerColOffset;
+      const isEmptyTile =
+        baseCol === EMPTY_COORD[0] && baseRow === EMPTY_COORD[1];
+      if (isEmptyTile || isLastFrame) {
+        return SPECIAL_SPRITES.ACTION_EMPTY;
+      }
+
+      const col =
+        ACTION_BASE_COL + baseCol + stateColOffset + playerColOffset;
+      const row = baseRow + weaponRowOffset + playerRowOffset;
       return tileToSourceRect(col, row);
     });
     result[tileKey] = mapped;

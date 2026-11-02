@@ -291,52 +291,125 @@ describe('spriteAtlas', () => {
       expect(getPlayerDeathFrames(1, Direction.Left)[0].y).toBe(55 * 25);
     });
 
-    it('calculates 5-tile weapon swing animations for Broom (+22), Plunger (+29), FryingPan (+36), health states (+0/+6/+12/+18), and P2 (+24)', () => {
-      const weaponOffsets: Array<[WeaponType, number]> = [
-        ['Broom', 22],
-        ['Plunger', 29],
-        ['FryingPan', 36],
+    it('calculates 5-tile weapon swing animations at col 54..77 with P1 rows (Broom=1, Plunger=8, FryingPan=15), P2 +21 row offset (22, 29, 36), health state col offsets (+0/+6/+12/+18), preserved empty tiles [5, 1], and directional idle recovery frames', () => {
+      const weaponRowsP1: Array<[WeaponType, number]> = [
+        ['Broom', 1],
+        ['Plunger', 8],
+        ['FryingPan', 15],
       ];
 
-      for (const [weapon, rowOffset] of weaponOffsets) {
+      for (const [weapon, baseRowP1] of weaponRowsP1) {
         const swingP1 = getWeaponSwingFrames(1, weapon, Direction.Left, 'Normal');
-        // playerActLeft base frame 0 is [0, 0] -> [0, rowOffset]
+        // playerActLeft base frame 0 is [0, 0] -> col 54, row baseRowP1
         expect(swingP1.playerTile[0]).toEqual({
-          x: 0 * 25,
-          y: rowOffset * 25,
+          x: 54 * 25,
+          y: baseRowP1 * 25,
           w: 25,
           h: 25,
         });
-        // upActLeft base frame 0 is [0, -1] -> [0, rowOffset - 1]
+        // upActLeft base frame 0 is [0, -1] -> col 54, row baseRowP1 - 1
         expect(swingP1.upTile[0]).toEqual({
-          x: 0 * 25,
-          y: (rowOffset - 1) * 25,
+          x: 54 * 25,
+          y: (baseRowP1 - 1) * 25,
           w: 25,
           h: 25,
         });
-        // leftActLeft base frame 1 is [1, 0] -> [1, rowOffset]
+        // leftActLeft frame 0 is EMPTY_COORD [5, 1] (must not be shifted!)
+        expect(swingP1.leftTile[0]).toEqual(SPECIAL_SPRITES.ACTION_EMPTY);
+        // leftActLeft base frame 1 is [1, 0] -> col 55, row baseRowP1
         expect(swingP1.leftTile[1]).toEqual({
-          x: 1 * 25,
-          y: rowOffset * 25,
+          x: 55 * 25,
+          y: baseRowP1 * 25,
+          w: 25,
+          h: 25,
+        });
+        // rightTile and downTile during left swing remain ACTION_EMPTY [5, 1]
+        expect(swingP1.rightTile).toEqual([
+          SPECIAL_SPRITES.ACTION_EMPTY,
+          SPECIAL_SPRITES.ACTION_EMPTY,
+          SPECIAL_SPRITES.ACTION_EMPTY,
+          SPECIAL_SPRITES.ACTION_EMPTY,
+        ]);
+        expect(swingP1.downTile).toEqual([
+          SPECIAL_SPRITES.ACTION_EMPTY,
+          SPECIAL_SPRITES.ACTION_EMPTY,
+          SPECIAL_SPRITES.ACTION_EMPTY,
+          SPECIAL_SPRITES.ACTION_EMPTY,
+        ]);
+        // Final recovery frame on playerTile matches directional idle sprite
+        expect(swingP1.playerTile[swingP1.playerTile.length - 1]).toEqual(
+          getPlayerIdleSpriteRect(1, Direction.Left, 'Normal')
+        );
+
+        // P2 uses +21 row offset (rows 22, 29, 36) at the same base col 54
+        const swingP2 = getWeaponSwingFrames(2, weapon, Direction.Left, 'Normal');
+        expect(swingP2.playerTile[0]).toEqual({
+          x: 54 * 25,
+          y: (baseRowP1 + 21) * 25,
           w: 25,
           h: 25,
         });
       }
 
-      // Health state column offsets on playerTile (+0, +6, +12, +18) and P2 evil offset (+24)
+      // Health state column offsets (+0, +6, +12, +18) apply to both playerTile and active adjacent swing tiles
       const bruisedP1 = getWeaponSwingFrames(1, 'Broom', Direction.Left, 'Bruised');
-      expect(bruisedP1.playerTile[0].x).toBe(6 * 25);
-      // Last recovery frame row is 13 for Bruised
+      expect(bruisedP1.playerTile[0].x).toBe((54 + 6) * 25);
+      expect(bruisedP1.leftTile[1].x).toBe((54 + 1 + 6) * 25);
+      expect(bruisedP1.upTile[0].x).toBe((54 + 6) * 25);
       expect(
-        bruisedP1.playerTile[bruisedP1.playerTile.length - 1].y
-      ).toBe(13 * 25);
+        bruisedP1.playerTile[bruisedP1.playerTile.length - 1]
+      ).toEqual(getPlayerIdleSpriteRect(1, Direction.Left, 'Bruised'));
 
       const dyingP2 = getWeaponSwingFrames(2, 'FryingPan', Direction.Left, 'Dying');
-      // Dying (+18) + P2 (+24) = 42 on frame 0
-      expect(dyingP2.playerTile[0].x).toBe((18 + 24) * 25);
+      // Base col 54 + Dying (+18) = col 72, row 15 + 21 = 36
+      expect(dyingP2.playerTile[0].x).toBe((54 + 18) * 25);
       expect(dyingP2.playerTile[0].y).toBe(36 * 25);
-      // Adjacent tiles for P2 also get +24 col offset
-      expect(dyingP2.leftTile[1].x).toBe((1 + 24) * 25);
+      // Adjacent active tiles also get base col 54 + Dying (+18) and P2 row 36
+      expect(dyingP2.leftTile[1]).toEqual({
+        x: (54 + 1 + 18) * 25,
+        y: 36 * 25,
+        w: 25,
+        h: 25,
+      });
+      // Empty adjacent tiles stay at [5, 1]
+      expect(dyingP2.leftTile[0]).toEqual(SPECIAL_SPRITES.ACTION_EMPTY);
+      expect(dyingP2.rightTile[0]).toEqual(SPECIAL_SPRITES.ACTION_EMPTY);
+      expect(
+        dyingP2.playerTile[dyingP2.playerTile.length - 1]
+      ).toEqual(getPlayerIdleSpriteRect(2, Direction.Left, 'Dying'));
+
+      // Verify Down and Up frying pan swings map to rows 18..20 (P1) and 39..41 (P2)
+      const panDownP1 = getWeaponSwingFrames(1, 'FryingPan', Direction.Down, 'Normal');
+      expect(panDownP1.leftTile[0]).toEqual({ x: 54 * 25, y: 19 * 25, w: 25, h: 25 });
+      expect(panDownP1.playerTile[0]).toEqual({ x: 55 * 25, y: 19 * 25, w: 25, h: 25 });
+      expect(panDownP1.playerTile[1]).toEqual({ x: 56 * 25, y: 19 * 25, w: 25, h: 25 });
+      expect(panDownP1.downTile[1]).toEqual({ x: 56 * 25, y: 20 * 25, w: 25, h: 25 });
+      expect(panDownP1.playerTile[2]).toEqual(
+        getPlayerIdleSpriteRect(1, Direction.Down, 'Normal')
+      );
+
+      const panUpP2 = getWeaponSwingFrames(2, 'FryingPan', Direction.Up, 'Injured');
+      expect(panUpP2.playerTile[0]).toEqual({
+        x: (54 + 3 + 12) * 25,
+        y: 40 * 25,
+        w: 25,
+        h: 25,
+      });
+      expect(panUpP2.rightTile[0]).toEqual({
+        x: (54 + 4 + 12) * 25,
+        y: 40 * 25,
+        w: 25,
+        h: 25,
+      });
+      expect(panUpP2.playerTile[1]).toEqual({
+        x: (54 + 5 + 12) * 25,
+        y: 40 * 25,
+        w: 25,
+        h: 25,
+      });
+      expect(panUpP2.playerTile[2]).toEqual(
+        getPlayerIdleSpriteRect(2, Direction.Up, 'Injured')
+      );
     });
   });
 

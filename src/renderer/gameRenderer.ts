@@ -1077,7 +1077,7 @@ export class GameRenderer implements IGameRenderer {
       const totalFrames = swing.playerTile.length;
       const progress = Math.min(
         1,
-        Math.max(0, 1 - player.attackState.timerMs / 250)
+        Math.max(0, 1 - player.attackState.timerMs / 500)
       );
       const frameIdx = Math.min(
         totalFrames - 1,

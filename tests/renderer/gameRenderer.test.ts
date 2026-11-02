@@ -835,6 +835,75 @@ describe('gameRenderer', () => {
         650,
       ]);
     });
+
+    it('renders 5-tile FryingPan attack animation across the full 500ms swing duration using spritesheet cols 54..77', () => {
+      const { canvas, ctx } = createMockCanvasAndCtx();
+      const offscreenFactory = () => createMockCanvasAndCtx().canvas;
+      const spritesheet = {} as CanvasImageSource;
+      const renderer = new GameRenderer(canvas, spritesheet, offscreenFactory);
+
+      // Mid-swing (timerMs = 300 out of 500 -> progress = 0.4 -> frameIdx = 1 of 4 for Left)
+      const state = createMockGameState({
+        players: [
+          createPlayer(1, {
+            x: 200,
+            y: 300,
+            direction: Direction.Left,
+            attackState: {
+              active: true,
+              weapon: 'FryingPan',
+              timerMs: 300,
+              direction: Direction.Left,
+              hasDealtKnockback: false,
+            },
+          }),
+          createPlayer(2),
+        ],
+      });
+
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+
+      // Frame 1 of P1 FryingPan Left:
+      // playerTile[1] = [56, 15] -> (1400, 375) drawn at (200, 300)
+      // leftTile[1] = [55, 15] -> (1375, 375) drawn at (175, 300)
+      // rightTile[1] = ACTION_EMPTY [5, 1] -> (125, 25) drawn at (225, 300)
+      expect(
+        ctx.drawImageCalls.some(
+          (args) =>
+            args[1] === 56 * 25 &&
+            args[2] === 15 * 25 &&
+            args[5] === 200 &&
+            args[6] === 300
+        )
+      ).toBe(true);
+      expect(
+        ctx.drawImageCalls.some(
+          (args) =>
+            args[1] === 55 * 25 &&
+            args[2] === 15 * 25 &&
+            args[5] === 175 &&
+            args[6] === 300
+        )
+      ).toBe(true);
+      expect(
+        ctx.drawImageCalls.some(
+          (args) =>
+            args[1] === 5 * 25 &&
+            args[2] === 1 * 25 &&
+            args[5] === 225 &&
+            args[6] === 300
+        )
+      ).toBe(true);
+    });
   });
 
   describe('computeWindowStageLayout (Browser Window Game Scaling)', () => {

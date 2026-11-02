@@ -162,6 +162,7 @@ export interface MobileControlsOptions {
   storage?: Storage | null;
   onZoomDelta?: (delta: number) => void;
   onZoomCycle?: () => void;
+  onAutoEnable?: () => void;
 }
 
 export class MobileControls {
@@ -196,6 +197,7 @@ export class MobileControls {
   private currentZoomDisplay = 1.0;
   private readonly onZoomDelta?: (delta: number) => void;
   private readonly onZoomCycle?: () => void;
+  private readonly onAutoEnable?: () => void;
   private allInteractiveButtons: HTMLButtonElement[] = [];
   private joystickTrackers: ActiveJoystickTracker[] = [];
   private lastPressedJoystick: ActiveJoystickTracker | null = null;
@@ -211,6 +213,7 @@ export class MobileControls {
     this.inputManager = options.inputManager;
     this.onZoomDelta = options.onZoomDelta;
     this.onZoomCycle = options.onZoomCycle;
+    this.onAutoEnable = options.onAutoEnable;
     this.storage =
       options.storage !== undefined
         ? options.storage
@@ -259,6 +262,7 @@ export class MobileControls {
           if (this.sessionActive) {
             this.render();
           }
+          this.onAutoEnable?.();
         }
       }
     };

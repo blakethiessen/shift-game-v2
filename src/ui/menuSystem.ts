@@ -7,8 +7,13 @@ import {
   LobbyConfig,
   NetPacket,
   PlayerKeyBindings,
+  WindowScaleMode,
   createDefaultLobbyConfig,
 } from '../shared/types';
+import {
+  DEFAULT_WINDOW_SCALE_MODE,
+  WINDOW_SCALE_MODES,
+} from '../renderer/gameRenderer';
 
 export type MenuScreen =
   | 'start'
@@ -31,6 +36,9 @@ export interface MenuCallbacks {
   getMobileControlsForceState?: () => boolean | null;
   onCameraZoomChange?: (zoom: number) => void;
   getCameraZoom?: () => number;
+  onWindowScaleModeChange?: (mode: WindowScaleMode) => void;
+  getWindowScaleMode?: () => WindowScaleMode;
+  onScreenChange?: (screen: MenuScreen) => void;
 }
 
 export interface MenuSystemOptions {
@@ -142,6 +150,7 @@ export class MenuSystem {
 
     if (screen === 'hidden') {
       this.rootEl.classList.add('is-hidden');
+      this.callbacks.onScreenChange?.(screen);
       return;
     }
     this.rootEl.classList.remove('is-hidden');
@@ -174,6 +183,7 @@ export class MenuSystem {
     }
 
     this.render();
+    this.callbacks.onScreenChange?.(screen);
   }
 
   public hide(): void {
@@ -825,12 +835,12 @@ export class MenuSystem {
 
     topGrid.appendChild(volumeBox);
 
-    // Gameplay / Local Shift Mode Box
+    // Gameplay / Display Settings Box
     const modeBox = document.createElement('div');
     modeBox.className = 'lobby-box';
     const modeTitle = document.createElement('div');
     modeTitle.className = 'menu-header-small';
-    modeTitle.textContent = '- SHIFT MODE -';
+    modeTitle.textContent = '- GAMEPLAY & DISPLAY -';
     modeBox.appendChild(modeTitle);
 
     const localShiftRow = document.createElement('div');
@@ -880,6 +890,44 @@ export class MenuSystem {
     touchRow.appendChild(touchLabel);
     touchRow.appendChild(touchBtn);
     modeBox.appendChild(touchRow);
+
+    const scaleRow = document.createElement('div');
+    scaleRow.className = 'setting-row';
+    const scaleLabel = document.createElement('span');
+    scaleLabel.textContent = 'Window Scale:';
+    const scaleBtn = document.createElement('button');
+    scaleBtn.type = 'button';
+    scaleBtn.className = 'action-btn';
+    scaleBtn.setAttribute('data-testid', 'options-window-scale');
+    const currentScaleMode =
+      this.callbacks.getWindowScaleMode?.() ?? DEFAULT_WINDOW_SCALE_MODE;
+    const formatScaleLabel = (mode: WindowScaleMode): string => {
+      switch (mode) {
+        case 'fit':
+          return 'Fit (Integer)';
+        case 'integer':
+          return 'Integer (1x/2x/3x)';
+        case 'stretch':
+          return 'Stretch';
+        case 'native':
+          return 'Original (1x)';
+      }
+    };
+    scaleBtn.textContent = formatScaleLabel(currentScaleMode);
+    scaleBtn.addEventListener('click', () => {
+      this.audioManager.playSound('menuSelect');
+      const cur =
+        this.callbacks.getWindowScaleMode?.() ?? DEFAULT_WINDOW_SCALE_MODE;
+      const idx = WINDOW_SCALE_MODES.indexOf(cur);
+      const next =
+        WINDOW_SCALE_MODES[(idx + 1) % WINDOW_SCALE_MODES.length] ??
+        DEFAULT_WINDOW_SCALE_MODE;
+      this.callbacks.onWindowScaleModeChange?.(next);
+      this.render();
+    });
+    scaleRow.appendChild(scaleLabel);
+    scaleRow.appendChild(scaleBtn);
+    modeBox.appendChild(scaleRow);
 
     const zoomRow = document.createElement('div');
     zoomRow.className = 'slider-row';

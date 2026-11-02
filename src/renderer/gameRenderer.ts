@@ -22,6 +22,8 @@ import {
   PlayerState,
   RenderOptions,
   Vector2D,
+  WindowScaleMode,
+  WindowStageLayout,
   WorldGridState,
   WorldType,
   getWorldForSide,
@@ -56,6 +58,137 @@ export const CAMERA_ZOOM_STEP = 0.25;
 export const CAMERA_ZOOM_PRESETS: readonly number[] = [
   1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
 ];
+
+export const DEFAULT_WINDOW_SCALE_MODE: WindowScaleMode = 'fit';
+export const WINDOW_SCALE_MODES: readonly WindowScaleMode[] = [
+  'fit',
+  'integer',
+  'stretch',
+  'native',
+];
+
+/**
+ * Computes the display dimensions and scale factors for the game stage/canvas
+ * within the browser viewport.
+ *
+ * - 'fit' (Default): Proportional fit to window with integer-snapped tile dimensions
+ *   (every 25x25 tile is scaled to an exact integer N x N screen pixel square so the
+ *   stage fills the window cleanly on 1080p/1440p/4K with zero sub-pixel tile seams).
+ * - 'integer': Strict whole-canvas integer multiples (1x, 2x, 3x...) when the viewport
+ *   is at least 1x, or downscales by integer tile size if the viewport is smaller than 1x.
+ * - 'stretch': Fills 100% of both viewport width and height.
+ * - 'native': Fixed 1x resolution (1000x650 or 500x650).
+ */
+export function computeWindowStageLayout(
+  viewportWidth: number,
+  viewportHeight: number,
+  baseWidth: number = FULL_VIEWPORT_WIDTH_PX,
+  baseHeight: number = FULL_VIEWPORT_HEIGHT_PX,
+  mode: WindowScaleMode = DEFAULT_WINDOW_SCALE_MODE
+): WindowStageLayout {
+  const safeBaseW =
+    Number.isFinite(baseWidth) && baseWidth > 0
+      ? baseWidth
+      : FULL_VIEWPORT_WIDTH_PX;
+  const safeBaseH =
+    Number.isFinite(baseHeight) && baseHeight > 0
+      ? baseHeight
+      : FULL_VIEWPORT_HEIGHT_PX;
+  const safeViewW =
+    Number.isFinite(viewportWidth) && viewportWidth > 0
+      ? viewportWidth
+      : safeBaseW;
+  const safeViewH =
+    Number.isFinite(viewportHeight) && viewportHeight > 0
+      ? viewportHeight
+      : safeBaseH;
+  const safeMode: WindowScaleMode = WINDOW_SCALE_MODES.includes(mode)
+    ? mode
+    : DEFAULT_WINDOW_SCALE_MODE;
+
+  const tilesW = Math.max(1, Math.round(safeBaseW / TILE_SIZE_PX));
+  const tilesH = Math.max(1, Math.round(safeBaseH / TILE_SIZE_PX));
+
+  if (safeMode === 'native') {
+    return {
+      mode: 'native',
+      baseWidth: safeBaseW,
+      baseHeight: safeBaseH,
+      width: safeBaseW,
+      height: safeBaseH,
+      scaleX: 1,
+      scaleY: 1,
+      tilePx: TILE_SIZE_PX,
+    };
+  }
+
+  if (safeMode === 'stretch') {
+    const width = Math.max(1, Math.floor(safeViewW));
+    const height = Math.max(1, Math.floor(safeViewH));
+    return {
+      mode: 'stretch',
+      baseWidth: safeBaseW,
+      baseHeight: safeBaseH,
+      width,
+      height,
+      scaleX: width / safeBaseW,
+      scaleY: height / safeBaseH,
+      tilePx: Math.max(1, Math.floor(Math.min(width / tilesW, height / tilesH))),
+    };
+  }
+
+  if (safeMode === 'integer') {
+    const rawScale = Math.min(safeViewW / safeBaseW, safeViewH / safeBaseH);
+    if (rawScale >= 1) {
+      const intScale = Math.max(1, Math.floor(rawScale));
+      return {
+        mode: 'integer',
+        baseWidth: safeBaseW,
+        baseHeight: safeBaseH,
+        width: safeBaseW * intScale,
+        height: safeBaseH * intScale,
+        scaleX: intScale,
+        scaleY: intScale,
+        tilePx: TILE_SIZE_PX * intScale,
+      };
+    }
+    // Viewport smaller than 1x: downscale by integer tile pixel size so it never clips
+    const tilePx = Math.max(
+      1,
+      Math.floor(Math.min(safeViewW / tilesW, safeViewH / tilesH))
+    );
+    const width = tilesW * tilePx;
+    const height = tilesH * tilePx;
+    return {
+      mode: 'integer',
+      baseWidth: safeBaseW,
+      baseHeight: safeBaseH,
+      width,
+      height,
+      scaleX: width / safeBaseW,
+      scaleY: height / safeBaseH,
+      tilePx,
+    };
+  }
+
+  // 'fit' (Default): Proportional fit with integer-snapped tile dimensions
+  const tilePx = Math.max(
+    1,
+    Math.floor(Math.min(safeViewW / tilesW, safeViewH / tilesH))
+  );
+  const width = tilesW * tilePx;
+  const height = tilesH * tilePx;
+  return {
+    mode: 'fit',
+    baseWidth: safeBaseW,
+    baseHeight: safeBaseH,
+    width,
+    height,
+    scaleX: width / safeBaseW,
+    scaleY: height / safeBaseH,
+    tilePx,
+  };
+}
 
 export interface CameraViewport {
   zoom: number;
@@ -328,12 +461,16 @@ export class GameRenderer implements IGameRenderer {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // Handle full-screen ending banners
+    // Handle full-screen ending banners (always rendered at 1000x650 full viewport)
     if (state.phase === 'gameOver') {
+      this.resizeForMode('local');
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
       this.drawFullBanner(BANNER_SPRITES.I_gameOver);
       return;
     }
     if (state.phase === 'victory') {
+      this.resizeForMode('local');
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
       this.drawFullBanner(BANNER_SPRITES.I_theEnd);
       return;
     }

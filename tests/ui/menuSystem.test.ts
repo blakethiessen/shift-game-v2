@@ -226,6 +226,61 @@ describe('MenuSystem', () => {
     expect(container.textContent).toContain('1.75x');
   });
 
+  it('renders Window Scale toggle in Options Screen and cycles through fit, integer, stretch, and native modes', () => {
+    let currentScaleMode: 'fit' | 'integer' | 'stretch' | 'native' = 'fit';
+    const onWindowScaleModeChange = vi.fn((mode) => {
+      currentScaleMode = mode;
+    });
+
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: peer,
+      callbacks: {
+        getWindowScaleMode: () => currentScaleMode,
+        onWindowScaleModeChange,
+      },
+    });
+    menu.showScreen('options');
+
+    const scaleBtn = container.querySelector(
+      '[data-testid="options-window-scale"]'
+    ) as HTMLButtonElement;
+    expect(scaleBtn).toBeTruthy();
+    expect(scaleBtn.textContent).toBe('Fit (Integer)');
+
+    scaleBtn.click();
+    expect(onWindowScaleModeChange).toHaveBeenCalledWith('integer');
+    expect(
+      (container.querySelector('[data-testid="options-window-scale"]') as HTMLButtonElement)
+        .textContent
+    ).toBe('Integer (1x/2x/3x)');
+
+    (
+      container.querySelector('[data-testid="options-window-scale"]') as HTMLButtonElement
+    ).click();
+    expect(onWindowScaleModeChange).toHaveBeenCalledWith('stretch');
+    expect(
+      (container.querySelector('[data-testid="options-window-scale"]') as HTMLButtonElement)
+        .textContent
+    ).toBe('Stretch');
+
+    (
+      container.querySelector('[data-testid="options-window-scale"]') as HTMLButtonElement
+    ).click();
+    expect(onWindowScaleModeChange).toHaveBeenCalledWith('native');
+    expect(
+      (container.querySelector('[data-testid="options-window-scale"]') as HTMLButtonElement)
+        .textContent
+    ).toBe('Original (1x)');
+
+    (
+      container.querySelector('[data-testid="options-window-scale"]') as HTMLButtonElement
+    ).click();
+    expect(onWindowScaleModeChange).toHaveBeenCalledWith('fit');
+  });
+
   it('renders Tutorial Screen with formatted keybindings from InputManager and starts game on key press', () => {
     const onStartLocal = vi.fn();
     input.updateBinding('p1', 'Interact', 'KeyG');

@@ -363,4 +363,108 @@ describe('ShiftGameApp End-to-End Integration', () => {
 
     app.destroy();
   });
+
+  it('defaults to integer-snapped proportional fit to window and supports configurable Window Scale modes and live window resize', () => {
+    Object.defineProperty(window, 'innerWidth', {
+      writable: true,
+      configurable: true,
+      value: 1920,
+    });
+    Object.defineProperty(window, 'innerHeight', {
+      writable: true,
+      configurable: true,
+      value: 960,
+    });
+
+    const stage = document.createElement('div');
+    stage.id = 'game-stage';
+    const canvas = createMockCanvas();
+    const uiOverlay = document.createElement('div');
+    uiOverlay.id = 'ui-overlay';
+    stage.appendChild(canvas);
+    stage.appendChild(uiOverlay);
+    document.body.appendChild(stage);
+
+    const app = new ShiftGameApp({
+      container: uiOverlay,
+      canvas,
+      canvasFactory: () => createMockCanvas(),
+      autoStartLoop: false,
+      mobileControlsEnabled: false,
+    });
+
+    // Default mode is 'fit' (integer-tile-snapped proportional fit)
+    // On 1920x960 for 1000x650: tilePx = 36 -> 1440x936 (scale 1.44)
+    expect(app.getWindowScaleMode()).toBe('fit');
+    expect(canvas.style.width).toBe('1440px');
+    expect(canvas.style.height).toBe('936px');
+    expect(stage.style.width).toBe('1440px');
+    expect(stage.style.height).toBe('936px');
+
+    const menuEl = uiOverlay.querySelector('.shift-menu-overlay') as HTMLElement;
+    expect(menuEl.style.transform).toBe('scale(1.44, 1.44)');
+
+    // Start Online Game (500x650 single dimension) -> width becomes 20 * 36 = 720px, height 936px
+    app.startOnlineGame(
+      {
+        mode: 'online',
+        partnerVisibility: 'strict',
+        shiftMode: 'cooperative',
+        muffledCrossDimensionAudio: true,
+      },
+      true
+    );
+    expect(canvas.width).toBe(500);
+    expect(canvas.style.width).toBe('720px');
+    expect(canvas.style.height).toBe('936px');
+
+    // Cycle HUD window scale button: 'fit' -> 'integer' -> 'stretch' -> 'native' -> 'fit'
+    const hudScaleBtn = uiOverlay.querySelector(
+      '[data-testid="hud-window-scale"]'
+    ) as HTMLButtonElement;
+    expect(hudScaleBtn).toBeTruthy();
+    expect(hudScaleBtn.textContent).toContain('FIT');
+
+    hudScaleBtn.click();
+    expect(app.getWindowScaleMode()).toBe('integer');
+    expect(canvas.style.width).toBe('500px');
+    expect(canvas.style.height).toBe('650px');
+
+    // Resize browser window to 2560x1440 while in 'integer' mode -> 2x (1000x1300 for online 500x650)
+    window.innerWidth = 2560;
+    window.innerHeight = 1440;
+    window.dispatchEvent(new Event('resize'));
+    expect(canvas.style.width).toBe('1000px');
+    expect(canvas.style.height).toBe('1300px');
+
+    // Cycle to 'stretch' -> fills 2560x1440
+    hudScaleBtn.click();
+    expect(app.getWindowScaleMode()).toBe('stretch');
+    expect(canvas.style.width).toBe('2560px');
+    expect(canvas.style.height).toBe('1440px');
+
+    // Cycle to 'native' -> fixed 1x (500x650)
+    hudScaleBtn.click();
+    expect(app.getWindowScaleMode()).toBe('native');
+    expect(canvas.style.width).toBe('500px');
+    expect(canvas.style.height).toBe('650px');
+    expect(window.localStorage.getItem('shift_game_window_scale_v1')).toBe(
+      'native'
+    );
+
+    // Switch back to 'fit' on a narrow mobile viewport (390x844):
+    // Start menu uses .is-compact-mobile (unscaled transform), whereas gameOver/victory banners scale 1000x650
+    app.setWindowScaleMode('fit');
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+    app.returnToTitle();
+    expect(menuEl.classList.contains('is-compact-mobile')).toBe(true);
+    expect(menuEl.style.transform).toBe('');
+
+    app.getMenuSystem().showScreen('gameOver');
+    expect(menuEl.classList.contains('is-compact-mobile')).toBe(false);
+    expect(menuEl.style.transform).toContain('scale(');
+
+    app.destroy();
+  });
 });

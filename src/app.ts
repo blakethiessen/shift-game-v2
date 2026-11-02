@@ -12,13 +12,19 @@ import {
   CAMERA_ZOOM_PRESETS,
   CAMERA_ZOOM_STEP,
   DEFAULT_CAMERA_ZOOM,
+  DEFAULT_WINDOW_SCALE_MODE,
   GameRenderer,
   MAX_CAMERA_ZOOM,
   MIN_CAMERA_ZOOM,
+  WINDOW_SCALE_MODES,
+  computeWindowStageLayout,
 } from './renderer/gameRenderer';
 import {
   DIM_HEIGHT_TILES,
+  DIM_WIDTH_PX,
   DIM_WIDTH_TILES,
+  FULL_VIEWPORT_HEIGHT_PX,
+  FULL_VIEWPORT_WIDTH_PX,
   GameEvent,
   GameState,
   IAudioManager,
@@ -29,11 +35,13 @@ import {
   PlayerId,
   PlayMode,
   SIMULATION_TICK_MS,
+  WindowScaleMode,
   createDefaultLobbyConfig,
 } from './shared/types';
 import { MenuSystem } from './ui/menuSystem';
 
 export const CAMERA_ZOOM_STORAGE_KEY = 'shift_game_camera_zoom_v1';
+export const WINDOW_SCALE_STORAGE_KEY = 'shift_game_window_scale_v1';
 
 export interface ShiftGameAppOptions {
   container: HTMLElement;
@@ -68,6 +76,7 @@ export class ShiftGameApp {
   private lobbyConfig: LobbyConfig = createDefaultLobbyConfig();
   private lightingEnabled = true;
   private cameraZoom: number = DEFAULT_CAMERA_ZOOM;
+  private windowScaleMode: WindowScaleMode = DEFAULT_WINDOW_SCALE_MODE;
   private running = false;
   private clientTickCounter = 0;
   private lastProcessedClientTick = 0;
@@ -75,11 +84,13 @@ export class ShiftGameApp {
   private zoomHudEl: HTMLElement | null = null;
   private zoomHudSliderEl: HTMLInputElement | null = null;
   private zoomHudValueEl: HTMLButtonElement | null = null;
+  private zoomHudScaleBtnEl: HTMLButtonElement | null = null;
 
   private accumulatorMs = 0;
   private lastFrameTimestamp = 0;
   private rafId: number | null = null;
   private readonly boundDebugKeyDown: (e: Event) => void;
+  private readonly boundWindowResize: () => void;
   private readonly inputEventTarget: EventTarget | null;
 
   constructor(options: ShiftGameAppOptions) {
@@ -109,6 +120,7 @@ export class ShiftGameApp {
     this.inputManager.setEnabled(false);
 
     this.cameraZoom = this.loadInitialCameraZoom();
+    this.windowScaleMode = this.loadInitialWindowScaleMode();
 
     this.mobileControls = new MobileControls({
       container: this.container,
@@ -120,6 +132,10 @@ export class ShiftGameApp {
       },
       onZoomCycle: () => {
         this.cycleCameraZoom();
+      },
+      onAutoEnable: () => {
+        this.updateZoomHudVisibility();
+        this.updateWindowStageScale();
       },
     });
     this.mobileControls.setZoomDisplay(this.cameraZoom);
@@ -170,6 +186,13 @@ export class ShiftGameApp {
       this.inputEventTarget.addEventListener('keydown', this.boundDebugKeyDown);
     }
 
+    this.boundWindowResize = () => {
+      this.updateWindowStageScale();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', this.boundWindowResize);
+    }
+
     // Subscribe to P2P network packets and mid-game disconnect/error events
     this.peerManager.onPacket((packet: NetPacket) => {
       this.handleNetPacket(packet);
@@ -188,6 +211,7 @@ export class ShiftGameApp {
         this.clientInputTracker.reset();
         this.renderer.resizeForMode('local');
         this.menuSystem.showScreen('lobby');
+        this.updateWindowStageScale();
       }
     });
 
@@ -208,6 +232,7 @@ export class ShiftGameApp {
         onMobileControlsChange: (forceEnabled) => {
           this.mobileControls.setForceEnabled(forceEnabled);
           this.updateZoomHudVisibility();
+          this.updateWindowStageScale();
         },
         getMobileControlsForceState: () =>
           this.mobileControls.getForceEnabled(),
@@ -215,8 +240,18 @@ export class ShiftGameApp {
           this.setCameraZoom(zoom);
         },
         getCameraZoom: () => this.cameraZoom,
+        onWindowScaleModeChange: (scaleMode) => {
+          this.setWindowScaleMode(scaleMode);
+        },
+        getWindowScaleMode: () => this.windowScaleMode,
+        onScreenChange: () => {
+          if (!this.menuSystem) return;
+          this.updateWindowStageScale();
+        },
       },
     });
+
+    this.updateWindowStageScale();
 
     if (options.autoStartLoop !== false && typeof window !== 'undefined') {
       this.startAnimationFrameLoop();
@@ -248,6 +283,169 @@ export class ShiftGameApp {
   public setMobileControlsEnabled(enabled: boolean | null): void {
     this.mobileControls.setForceEnabled(enabled);
     this.updateZoomHudVisibility();
+    this.updateWindowStageScale();
+  }
+
+  public getWindowScaleMode(): WindowScaleMode {
+    return this.windowScaleMode;
+  }
+
+  public setWindowScaleMode(mode: WindowScaleMode): void {
+    const safeMode: WindowScaleMode = WINDOW_SCALE_MODES.includes(mode)
+      ? mode
+      : DEFAULT_WINDOW_SCALE_MODE;
+    this.windowScaleMode = safeMode;
+    this.saveWindowScaleMode(safeMode);
+    this.syncZoomHudDisplay();
+    this.updateWindowStageScale();
+  }
+
+  public cycleWindowScaleMode(): WindowScaleMode {
+    const idx = WINDOW_SCALE_MODES.indexOf(this.windowScaleMode);
+    const next =
+      WINDOW_SCALE_MODES[(idx + 1) % WINDOW_SCALE_MODES.length] ??
+      DEFAULT_WINDOW_SCALE_MODE;
+    this.setWindowScaleMode(next);
+    return this.windowScaleMode;
+  }
+
+  private loadInitialWindowScaleMode(): WindowScaleMode {
+    const isValidMode = (val: string | null): val is WindowScaleMode =>
+      val !== null && (WINDOW_SCALE_MODES as readonly string[]).includes(val);
+
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const params = new URLSearchParams(window.location.search);
+      const urlScale = params.get('scale');
+      if (isValidMode(urlScale)) {
+        return urlScale;
+      }
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const saved = localStorage.getItem(WINDOW_SCALE_STORAGE_KEY);
+        if (isValidMode(saved)) {
+          return saved;
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
+    return DEFAULT_WINDOW_SCALE_MODE;
+  }
+
+  private saveWindowScaleMode(mode: WindowScaleMode): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(WINDOW_SCALE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  private formatHudScaleLabel(mode: WindowScaleMode): string {
+    switch (mode) {
+      case 'fit':
+        return 'SCALE: FIT';
+      case 'integer':
+        return 'SCALE: INT';
+      case 'stretch':
+        return 'SCALE: FULL';
+      case 'native':
+        return 'SCALE: 1X';
+    }
+  }
+
+  public updateWindowStageScale(): void {
+    const menuVisible = this.menuSystem ? this.menuSystem.isVisible() : true;
+    const isSingleDimensionView =
+      this.running && this.mode === 'online' && !menuVisible;
+    const baseWidth = isSingleDimensionView
+      ? DIM_WIDTH_PX
+      : FULL_VIEWPORT_WIDTH_PX;
+    const baseHeight = FULL_VIEWPORT_HEIGHT_PX;
+
+    const rawViewportWidth =
+      typeof window !== 'undefined' && window.innerWidth > 0
+        ? window.innerWidth
+        : baseWidth;
+    const rawViewportHeight =
+      typeof window !== 'undefined' && window.innerHeight > 0
+        ? window.innerHeight
+        : baseHeight;
+
+    const isOnlineMobileOverlay =
+      this.mobileControls?.isEnabled() && isSingleDimensionView;
+    const availHeight = isOnlineMobileOverlay
+      ? Math.max(1, rawViewportHeight - 110)
+      : rawViewportHeight;
+
+    const layout = computeWindowStageLayout(
+      rawViewportWidth,
+      availHeight,
+      baseWidth,
+      baseHeight,
+      this.windowScaleMode
+    );
+
+    this.canvas.style.width = `${layout.width}px`;
+    this.canvas.style.height = `${layout.height}px`;
+    this.canvas.setAttribute('data-scale-mode', layout.mode);
+
+    const stageEl =
+      this.canvas.parentElement?.id === 'game-stage'
+        ? this.canvas.parentElement
+        : null;
+
+    const menuEl = this.container.querySelector(
+      '.shift-menu-overlay'
+    ) as HTMLElement | null;
+
+    if (menuVisible && menuEl) {
+      const currentScreen = this.menuSystem ? this.menuSystem.getCurrentScreen() : 'start';
+      const isBannerScreen =
+        currentScreen === 'gameOver' || currentScreen === 'victory';
+      const isCompactMobileMenu =
+        rawViewportWidth <= 768 &&
+        this.windowScaleMode !== 'native' &&
+        !isBannerScreen;
+      menuEl.classList.toggle('is-compact-mobile', isCompactMobileMenu);
+
+      if (isCompactMobileMenu) {
+        menuEl.style.transform = '';
+        menuEl.style.transformOrigin = '';
+        if (stageEl) {
+          stageEl.style.width = `${rawViewportWidth}px`;
+          stageEl.style.height = `${rawViewportHeight}px`;
+          stageEl.setAttribute('data-scale-mode', layout.mode);
+        }
+      } else {
+        const menuLayout = computeWindowStageLayout(
+          rawViewportWidth,
+          rawViewportHeight,
+          FULL_VIEWPORT_WIDTH_PX,
+          FULL_VIEWPORT_HEIGHT_PX,
+          this.windowScaleMode
+        );
+        menuEl.style.transform = `scale(${menuLayout.scaleX}, ${menuLayout.scaleY})`;
+        menuEl.style.transformOrigin = 'center center';
+        if (stageEl) {
+          stageEl.style.width = `${menuLayout.width}px`;
+          stageEl.style.height = `${menuLayout.height}px`;
+          stageEl.setAttribute('data-scale-mode', layout.mode);
+        }
+      }
+    } else {
+      if (menuEl) {
+        menuEl.classList.remove('is-compact-mobile');
+        menuEl.style.transform = '';
+        menuEl.style.transformOrigin = '';
+      }
+      if (stageEl) {
+        stageEl.style.width = `${layout.width}px`;
+        stageEl.style.height = `${layout.height}px`;
+        stageEl.setAttribute('data-scale-mode', layout.mode);
+      }
+    }
   }
 
   public getCameraZoom(): number {
@@ -410,10 +608,24 @@ export class ShiftGameApp {
     bar.appendChild(valueBtn);
     bar.appendChild(inBtn);
 
+    const scaleBtn = document.createElement('button');
+    scaleBtn.type = 'button';
+    scaleBtn.className = 'zoom-hud-btn';
+    scaleBtn.setAttribute('data-testid', 'hud-window-scale');
+    scaleBtn.setAttribute('title', 'Cycle Window Scale Mode');
+    scaleBtn.textContent = this.formatHudScaleLabel(this.windowScaleMode);
+    scaleBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    scaleBtn.addEventListener('click', () => {
+      this.cycleWindowScaleMode();
+      scaleBtn.blur();
+    });
+    bar.appendChild(scaleBtn);
+
     this.container.appendChild(bar);
     this.zoomHudEl = bar;
     this.zoomHudSliderEl = slider;
     this.zoomHudValueEl = valueBtn;
+    this.zoomHudScaleBtnEl = scaleBtn;
   }
 
   private syncZoomHudDisplay(): void {
@@ -422,6 +634,11 @@ export class ShiftGameApp {
     }
     if (this.zoomHudValueEl) {
       this.zoomHudValueEl.textContent = this.formatZoomReadout(this.cameraZoom);
+    }
+    if (this.zoomHudScaleBtnEl) {
+      this.zoomHudScaleBtnEl.textContent = this.formatHudScaleLabel(
+        this.windowScaleMode
+      );
     }
   }
 
@@ -468,6 +685,7 @@ export class ShiftGameApp {
     this.running = true;
     this.accumulatorMs = 0;
     this.updateZoomHudVisibility();
+    this.updateWindowStageScale();
     this.audioManager.playSound('doorClosing');
     this.renderCurrentState(0);
   }
@@ -500,6 +718,7 @@ export class ShiftGameApp {
     this.running = true;
     this.accumulatorMs = 0;
     this.updateZoomHudVisibility();
+    this.updateWindowStageScale();
     this.audioManager.playSound('doorClosing');
     this.renderCurrentState(0);
   }
@@ -515,6 +734,7 @@ export class ShiftGameApp {
     }
     this.renderer.resizeForMode('local');
     this.menuSystem.showScreen('start');
+    this.updateWindowStageScale();
   }
 
   private handleNetPacket(packet: NetPacket): void {
@@ -704,6 +924,9 @@ export class ShiftGameApp {
         'keydown',
         this.boundDebugKeyDown
       );
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('resize', this.boundWindowResize);
     }
     this.zoomHudEl?.remove();
     this.mobileControls.destroy();

@@ -17,6 +17,9 @@ import {
   computeFloatingInventoryPosition,
   computeFinalRoomConvergenceAlpha,
   computeCameraViewport,
+  computeWindowStageLayout,
+  DEFAULT_WINDOW_SCALE_MODE,
+  WINDOW_SCALE_MODES,
   MIN_CAMERA_ZOOM,
   MAX_CAMERA_ZOOM,
   GameRenderer,
@@ -831,6 +834,164 @@ describe('gameRenderer', () => {
         1000,
         650,
       ]);
+    });
+  });
+
+  describe('computeWindowStageLayout (Browser Window Game Scaling)', () => {
+    it('defaults to proportional fit with integer-snapped tile dimensions ("fit") across 1080p, 1440p, 4K, and smaller viewports', () => {
+      expect(DEFAULT_WINDOW_SCALE_MODE).toBe('fit');
+      expect(WINDOW_SCALE_MODES).toEqual([
+        'fit',
+        'integer',
+        'stretch',
+        'native',
+      ]);
+
+      // 1080p browser tab (1920x960) in Local/Menu mode (1000x650 = 40x26 tiles of 25px)
+      // tilePx = floor(min(1920 / 40, 960 / 26)) = floor(min(48, 36.923)) = 36
+      const fit1080Local = computeWindowStageLayout(1920, 960, 1000, 650, 'fit');
+      expect(fit1080Local).toEqual({
+        mode: 'fit',
+        baseWidth: 1000,
+        baseHeight: 650,
+        width: 1440,
+        height: 936,
+        scaleX: 1.44,
+        scaleY: 1.44,
+        tilePx: 36,
+      });
+
+      // 1080p browser tab (1920x960) in Online mode (500x650 = 20x26 tiles of 25px)
+      // tilePx = floor(min(1920 / 20, 960 / 26)) = 36 -> 720x936
+      const fit1080Online = computeWindowStageLayout(1920, 960, 500, 650, 'fit');
+      expect(fit1080Online).toEqual({
+        mode: 'fit',
+        baseWidth: 500,
+        baseHeight: 650,
+        width: 720,
+        height: 936,
+        scaleX: 1.44,
+        scaleY: 1.44,
+        tilePx: 36,
+      });
+
+      // Exact 2x viewport (2000x1300) -> tilePx = 50, scale = 2.0
+      const fit2x = computeWindowStageLayout(2000, 1300, 1000, 650, 'fit');
+      expect(fit2x.width).toBe(2000);
+      expect(fit2x.height).toBe(1300);
+      expect(fit2x.scaleX).toBe(2);
+      expect(fit2x.tilePx).toBe(50);
+
+      // Smaller window (800x520) -> downscales cleanly with tilePx = 20 (0.8x)
+      const fitSmall = computeWindowStageLayout(800, 520, 1000, 650, 'fit');
+      expect(fitSmall.width).toBe(800);
+      expect(fitSmall.height).toBe(520);
+      expect(fitSmall.scaleX).toBe(0.8);
+      expect(fitSmall.tilePx).toBe(20);
+    });
+
+    it('computes strict whole-canvas multiples (1x, 2x, 3x) in "integer" mode and downscales cleanly when viewport < 1x', () => {
+      // 1920x960 -> floor(min(1.92, 1.4769)) = 1x (1000x650)
+      const int1080 = computeWindowStageLayout(1920, 960, 1000, 650, 'integer');
+      expect(int1080).toEqual({
+        mode: 'integer',
+        baseWidth: 1000,
+        baseHeight: 650,
+        width: 1000,
+        height: 650,
+        scaleX: 1,
+        scaleY: 1,
+        tilePx: 25,
+      });
+
+      // 2560x1440 -> floor(min(2.56, 2.215)) = 2x (2000x1300)
+      const int1440 = computeWindowStageLayout(2560, 1440, 1000, 650, 'integer');
+      expect(int1440).toEqual({
+        mode: 'integer',
+        baseWidth: 1000,
+        baseHeight: 650,
+        width: 2000,
+        height: 1300,
+        scaleX: 2,
+        scaleY: 2,
+        tilePx: 50,
+      });
+
+      // 3840x2160 -> floor(min(3.84, 3.32)) = 3x (3000x1950)
+      const int4k = computeWindowStageLayout(3840, 2160, 1000, 650, 'integer');
+      expect(int4k.width).toBe(3000);
+      expect(int4k.height).toBe(1950);
+      expect(int4k.scaleX).toBe(3);
+      expect(int4k.tilePx).toBe(75);
+
+      // Sub-1x window (800x520) -> downscales to integer tile size (20px) so it never clips
+      const intSub1x = computeWindowStageLayout(800, 520, 1000, 650, 'integer');
+      expect(intSub1x.width).toBe(800);
+      expect(intSub1x.height).toBe(520);
+      expect(intSub1x.scaleX).toBe(0.8);
+      expect(intSub1x.tilePx).toBe(20);
+    });
+
+    it('computes full-window dimensions in "stretch" mode and fixed 1x dimensions in "native" mode', () => {
+      const stretched = computeWindowStageLayout(1920, 1080, 1000, 650, 'stretch');
+      expect(stretched.width).toBe(1920);
+      expect(stretched.height).toBe(1080);
+      expect(stretched.scaleX).toBeCloseTo(1.92, 5);
+      expect(stretched.scaleY).toBeCloseTo(1080 / 650, 5);
+
+      const nativeLayout = computeWindowStageLayout(2560, 1440, 500, 650, 'native');
+      expect(nativeLayout).toEqual({
+        mode: 'native',
+        baseWidth: 500,
+        baseHeight: 650,
+        width: 500,
+        height: 650,
+        scaleX: 1,
+        scaleY: 1,
+        tilePx: 25,
+      });
+
+      // Edge cases: non-finite / negative / zero inputs and tiny viewports (10x10)
+      const fallbackLayout = computeWindowStageLayout(
+        Number.NaN,
+        -100,
+        0,
+        Number.POSITIVE_INFINITY,
+        'invalid_mode' as any
+      );
+      expect(fallbackLayout.mode).toBe('fit');
+      expect(fallbackLayout.width).toBe(1000);
+      expect(fallbackLayout.height).toBe(650);
+      expect(fallbackLayout.tilePx).toBe(25);
+
+      const tinyLayout = computeWindowStageLayout(10, 10, 1000, 650, 'fit');
+      expect(tinyLayout.tilePx).toBe(1);
+      expect(tinyLayout.width).toBe(40);
+      expect(tinyLayout.height).toBe(26);
+    });
+
+    it('resizes canvas to 1000x650 before drawing full-screen gameOver/victory banners even in online mode', () => {
+      const { canvas } = createMockCanvasAndCtx();
+      const offscreenFactory = () => createMockCanvasAndCtx().canvas;
+      const renderer = new GameRenderer(
+        canvas,
+        {} as CanvasImageSource,
+        offscreenFactory
+      );
+
+      const state = createMockGameState({ phase: 'gameOver' });
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+      expect(canvas.width).toBe(1000);
+      expect(canvas.height).toBe(650);
     });
   });
 });

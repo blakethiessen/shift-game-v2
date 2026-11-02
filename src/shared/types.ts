@@ -508,6 +508,18 @@ export interface ShiftRequestState {
 export type PlayMode = 'local' | 'online';
 export type PartnerVisibilityMode = 'strict' | 'echo';
 export type ShiftMode = 'cooperative' | 'individual';
+export type WindowScaleMode = 'fit' | 'integer' | 'stretch' | 'native';
+
+export interface WindowStageLayout {
+  mode: WindowScaleMode;
+  baseWidth: number;
+  baseHeight: number;
+  width: number;
+  height: number;
+  scaleX: number;
+  scaleY: number;
+  tilePx: number;
+}
 
 export interface LobbyConfig {
   mode: PlayMode;

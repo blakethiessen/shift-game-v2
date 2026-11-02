@@ -351,24 +351,24 @@ const BASE_ACTION_FRAMES: Record<
   upTile: {
     left: [
       [0, -1],
-      [2, -1],
-      [4, -1],
+      EMPTY_COORD,
+      EMPTY_COORD,
       EMPTY_COORD,
     ],
     right: [
       [0, 1],
-      [1, 1],
-      [3, 1],
+      EMPTY_COORD,
+      EMPTY_COORD,
       EMPTY_COORD,
     ],
     up: [
       [3, 3],
-      [5, 3],
+      EMPTY_COORD,
       EMPTY_COORD,
     ],
     down: [
       [1, 3],
-      [2, 3],
+      EMPTY_COORD,
       EMPTY_COORD,
     ],
   },
@@ -437,7 +437,10 @@ export function getWeaponSwingFrames(
       }
 
       const isEmptyTile =
-        baseCol === EMPTY_COORD[0] && baseRow === EMPTY_COORD[1];
+        (baseCol === EMPTY_COORD[0] && baseRow === EMPTY_COORD[1]) ||
+        (weapon === 'FryingPan' &&
+          tileKey === 'upTile' &&
+          (dirKey === 'up' || dirKey === 'down'));
       if (isEmptyTile || isLastFrame) {
         return SPECIAL_SPRITES.ACTION_EMPTY;
       }

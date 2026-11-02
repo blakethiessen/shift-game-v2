@@ -836,18 +836,20 @@ describe('gameRenderer', () => {
       ]);
     });
 
-    it('renders 5-tile FryingPan attack animation across the full 500ms swing duration using spritesheet cols 54..77', () => {
+    it('renders 5-tile FryingPan attack animation across the full 500ms swing duration using spritesheet cols 54..77, skips empty action tiles, disables smoothing, and snaps sub-pixel player coordinates', () => {
       const { canvas, ctx } = createMockCanvasAndCtx();
+      (ctx as Record<string, unknown>).imageSmoothingEnabled = true;
       const offscreenFactory = () => createMockCanvasAndCtx().canvas;
       const spritesheet = {} as CanvasImageSource;
       const renderer = new GameRenderer(canvas, spritesheet, offscreenFactory);
 
       // Mid-swing (timerMs = 300 out of 500 -> progress = 0.4 -> frameIdx = 1 of 4 for Left)
+      // Use sub-pixel coordinates (e.g. after diagonal movement) to verify integer pixel snapping
       const state = createMockGameState({
         players: [
           createPlayer(1, {
-            x: 200,
-            y: 300,
+            x: 200.42857,
+            y: 300.14285,
             direction: Direction.Left,
             attackState: {
               active: true,
@@ -872,10 +874,13 @@ describe('gameRenderer', () => {
         16.67
       );
 
+      // Should disable imageSmoothingEnabled even at 1x camera zoom to prevent atlas border bleeding
+      expect((ctx as Record<string, unknown>).imageSmoothingEnabled).toBe(false);
+
       // Frame 1 of P1 FryingPan Left:
-      // playerTile[1] = [56, 15] -> (1400, 375) drawn at (200, 300)
-      // leftTile[1] = [55, 15] -> (1375, 375) drawn at (175, 300)
-      // rightTile[1] = ACTION_EMPTY [5, 1] -> (125, 25) drawn at (225, 300)
+      // playerTile[1] = [56, 15] -> (1400, 375) drawn at integer-snapped (200, 300)
+      // leftTile[1] = [55, 15] -> (1375, 375) drawn at integer-snapped (175, 300)
+      // Empty action tiles (ACTION_EMPTY [5, 1] -> 125, 25) must NOT be drawn via drawImage
       expect(
         ctx.drawImageCalls.some(
           (args) =>
@@ -896,13 +901,9 @@ describe('gameRenderer', () => {
       ).toBe(true);
       expect(
         ctx.drawImageCalls.some(
-          (args) =>
-            args[1] === 5 * 25 &&
-            args[2] === 1 * 25 &&
-            args[5] === 225 &&
-            args[6] === 300
+          (args) => args[1] === 5 * 25 && args[2] === 1 * 25
         )
-      ).toBe(true);
+      ).toBe(false);
     });
   });
 

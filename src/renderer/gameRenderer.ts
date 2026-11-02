@@ -461,6 +461,9 @@ export class GameRenderer implements IGameRenderer {
     this.consumeFlashEvents(state);
 
     const ctx = this.ctx;
+    if ('imageSmoothingEnabled' in ctx) {
+      ctx.imageSmoothingEnabled = false;
+    }
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
     // Handle full-screen ending banners (always rendered at 1000x650 full viewport)
@@ -1537,6 +1540,18 @@ export class GameRenderer implements IGameRenderer {
     flipX: boolean = false
   ): void {
     if (!this.spritesheet) return;
+    if (
+      (rect.x === SPECIAL_SPRITES.ACTION_EMPTY.x &&
+        rect.y === SPECIAL_SPRITES.ACTION_EMPTY.y) ||
+      (rect.x === SPECIAL_SPRITES.S_Empty.x &&
+        rect.y === SPECIAL_SPRITES.S_Empty.y)
+    ) {
+      return;
+    }
+
+    const snappedX = Math.round(destX);
+    const snappedY = Math.round(destY);
+
     if (!flipX) {
       this.ctx.drawImage(
         this.spritesheet,
@@ -1544,8 +1559,8 @@ export class GameRenderer implements IGameRenderer {
         rect.y,
         rect.w,
         rect.h,
-        destX,
-        destY,
+        snappedX,
+        snappedY,
         rect.w,
         rect.h
       );
@@ -1553,7 +1568,7 @@ export class GameRenderer implements IGameRenderer {
     }
 
     this.ctx.save();
-    this.ctx.translate(destX + rect.w, destY);
+    this.ctx.translate(snappedX + rect.w, snappedY);
     this.ctx.scale(-1, 1);
     this.ctx.drawImage(
       this.spritesheet,
@@ -1581,10 +1596,12 @@ export class GameRenderer implements IGameRenderer {
       return;
     }
 
+    const snappedX = Math.round(destX);
+    const snappedY = Math.round(destY);
     const halfW = rect.w / 2;
     const halfH = rect.h / 2;
     this.ctx.save();
-    this.ctx.translate(destX + halfW, destY + halfH);
+    this.ctx.translate(snappedX + halfW, snappedY + halfH);
     this.ctx.rotate((rotationDeg * Math.PI) / 180);
     this.ctx.drawImage(
       this.spritesheet,

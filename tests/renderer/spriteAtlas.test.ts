@@ -314,6 +314,12 @@ describe('spriteAtlas', () => {
           w: 25,
           h: 25,
         });
+        // upActLeft frames 1..3 have no weapon pixels in upTile and must be ACTION_EMPTY
+        expect(swingP1.upTile.slice(1)).toEqual([
+          SPECIAL_SPRITES.ACTION_EMPTY,
+          SPECIAL_SPRITES.ACTION_EMPTY,
+          SPECIAL_SPRITES.ACTION_EMPTY,
+        ]);
         // leftActLeft frame 0 is EMPTY_COORD [5, 1] (must not be shifted!)
         expect(swingP1.leftTile[0]).toEqual(SPECIAL_SPRITES.ACTION_EMPTY);
         // leftActLeft base frame 1 is [1, 0] -> col 55, row baseRowP1
@@ -378,12 +384,18 @@ describe('spriteAtlas', () => {
         dyingP2.playerTile[dyingP2.playerTile.length - 1]
       ).toEqual(getPlayerIdleSpriteRect(2, Direction.Left, 'Dying'));
 
-      // Verify Down and Up frying pan swings map to rows 18..20 (P1) and 39..41 (P2)
+      // Verify Down and Up frying pan swings map to rows 18..20 (P1) and 39..41 (P2),
+      // with upTile remaining ACTION_EMPTY since FryingPan does not extend into upTile on Up/Down swings
       const panDownP1 = getWeaponSwingFrames(1, 'FryingPan', Direction.Down, 'Normal');
       expect(panDownP1.leftTile[0]).toEqual({ x: 54 * 25, y: 19 * 25, w: 25, h: 25 });
       expect(panDownP1.playerTile[0]).toEqual({ x: 55 * 25, y: 19 * 25, w: 25, h: 25 });
       expect(panDownP1.playerTile[1]).toEqual({ x: 56 * 25, y: 19 * 25, w: 25, h: 25 });
       expect(panDownP1.downTile[1]).toEqual({ x: 56 * 25, y: 20 * 25, w: 25, h: 25 });
+      expect(panDownP1.upTile).toEqual([
+        SPECIAL_SPRITES.ACTION_EMPTY,
+        SPECIAL_SPRITES.ACTION_EMPTY,
+        SPECIAL_SPRITES.ACTION_EMPTY,
+      ]);
       expect(panDownP1.playerTile[2]).toEqual(
         getPlayerIdleSpriteRect(1, Direction.Down, 'Normal')
       );
@@ -407,6 +419,11 @@ describe('spriteAtlas', () => {
         w: 25,
         h: 25,
       });
+      expect(panUpP2.upTile).toEqual([
+        SPECIAL_SPRITES.ACTION_EMPTY,
+        SPECIAL_SPRITES.ACTION_EMPTY,
+        SPECIAL_SPRITES.ACTION_EMPTY,
+      ]);
       expect(panUpP2.playerTile[2]).toEqual(
         getPlayerIdleSpriteRect(2, Direction.Up, 'Injured')
       );

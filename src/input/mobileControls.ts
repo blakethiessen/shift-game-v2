@@ -7,6 +7,7 @@
 import {
   DIM_HEIGHT_PX,
   DIM_WIDTH_PX,
+  DevicePlatform,
   GameState,
   PlayMode,
   PlayerId,
@@ -14,10 +15,121 @@ import {
 } from '../shared/types';
 import { InputManager } from './inputManager';
 
+export type { DevicePlatform } from '../shared/types';
+
 export const DEFAULT_JOYSTICK_MAX_RADIUS_PX = 38;
 export const DEFAULT_JOYSTICK_DEADZONE_PX = 10;
 export const OCTANT_THRESHOLD = Math.sin(Math.PI / 8); // ~0.3826834
 export const MOBILE_CONTROLS_STORAGE_KEY = 'shift_game_mobile_controls_v1';
+
+export interface DeviceEnvironmentInput {
+  userAgent?: string;
+  platform?: string;
+  maxTouchPoints?: number;
+  userAgentDataMobile?: boolean;
+  urlSearch?: string;
+  matchMedia?: ((query: string) => { matches: boolean }) | null;
+}
+
+const MOBILE_UA_REGEX =
+  /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|Tablet|Silk|Kindle/i;
+
+const DESKTOP_OS_UA_REGEX =
+  /Windows NT|Macintosh|Mac OS X|X11;\s*(?:Linux|CrOS|FreeBSD|OpenBSD)|Linux\s+(?:x86_64|i686)/i;
+
+/**
+ * Discerns whether the runtime environment is a PC ('pc') or a Mobile/Tablet ('mobile') setup.
+ * Note: Desktop/laptop PCs frequently report navigator.maxTouchPoints > 0 (touchscreen laptops,
+ * monitors, or virtual input drivers), so maxTouchPoints > 0 alone never classifies a PC as mobile.
+ */
+export function detectDevicePlatform(
+  env?: DeviceEnvironmentInput
+): DevicePlatform {
+  const search =
+    env?.urlSearch !== undefined
+      ? env.urlSearch
+      : typeof window !== 'undefined'
+      ? window.location?.search ?? ''
+      : '';
+
+  if (search) {
+    const params = new URLSearchParams(search);
+    const platformParam = params.get('platform')?.toLowerCase();
+    if (
+      platformParam === 'pc' ||
+      params.get('pc') === '1' ||
+      params.get('mobile') === '0' ||
+      params.get('touch') === '0'
+    ) {
+      return 'pc';
+    }
+    if (
+      platformParam === 'mobile' ||
+      params.get('mobile') === '1' ||
+      params.get('touch') === '1'
+    ) {
+      return 'mobile';
+    }
+  }
+
+  const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+  const ua = env?.userAgent !== undefined ? env.userAgent : nav?.userAgent ?? '';
+  const platform =
+    env?.platform !== undefined ? env.platform : nav?.platform ?? '';
+  const maxTouchPoints =
+    env?.maxTouchPoints !== undefined
+      ? env.maxTouchPoints
+      : nav?.maxTouchPoints ?? 0;
+
+  const uaDataMobile =
+    env?.userAgentDataMobile !== undefined
+      ? env.userAgentDataMobile
+      : (nav as (Navigator & { userAgentData?: { mobile?: boolean } }) | undefined)
+          ?.userAgentData?.mobile;
+
+  const matchMediaFn =
+    env?.matchMedia !== undefined
+      ? env.matchMedia
+      : typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? (q: string) => window.matchMedia(q)
+      : null;
+
+  const hasFineHoverPointer =
+    matchMediaFn?.('(hover: hover) and (pointer: fine)')?.matches === true;
+  const hasCoarsePrimaryPointer =
+    matchMediaFn?.('(pointer: coarse)')?.matches === true;
+
+  // 1. Explicit mobile User-Agent Client Hint or mobile/tablet UA string
+  if (uaDataMobile === true || MOBILE_UA_REGEX.test(ua)) {
+    return 'mobile';
+  }
+
+  // 2. iPadOS 13+ desktop-class Safari (reports MacIntel with multi-touch and coarse pointer)
+  if (
+    platform === 'MacIntel' &&
+    maxTouchPoints > 1 &&
+    (!hasFineHoverPointer || hasCoarsePrimaryPointer)
+  ) {
+    return 'mobile';
+  }
+
+  // 3. Primary fine pointer with hover (mouse/trackpad on PC) -> always 'pc' even if maxTouchPoints > 0
+  if (hasFineHoverPointer) {
+    return 'pc';
+  }
+
+  // 4. Explicit non-mobile client hint or desktop OS UA without coarse primary pointer
+  if (uaDataMobile === false || (DESKTOP_OS_UA_REGEX.test(ua) && !hasCoarsePrimaryPointer)) {
+    return 'pc';
+  }
+
+  // 5. Coarse primary pointer without fine hover pointer
+  if (hasCoarsePrimaryPointer) {
+    return 'mobile';
+  }
+
+  return 'pc';
+}
 
 export interface JoystickState {
   up: boolean;
@@ -117,13 +229,22 @@ export function computeJoystickState(
 }
 
 /**
- * Computes the head-to-head station rotations so two players holding opposite short ends
- * of the phone long-ways always see their viewport and controls right-side-up facing their end.
+ * Computes the Local Co-op station layout and rotations.
+ * - On 'pc': Always side-by-side upright (0 deg / 0 deg, horizontal split), never facing off.
+ * - On 'mobile': Head-to-head opposite ends of the phone (90/-90 deg in landscape, 0/180 deg in portrait).
  */
 export function computeLocalCoopStationRotations(
   viewportWidth: number,
-  viewportHeight: number
+  viewportHeight: number,
+  platform: DevicePlatform = 'mobile'
 ): LocalCoopStationLayout {
+  if (platform === 'pc') {
+    return {
+      splitAxis: 'horizontal',
+      p1RotationDeg: 0,
+      p2RotationDeg: 0,
+    };
+  }
   if (viewportWidth >= viewportHeight) {
     // Landscape: Phone held horizontally long-ways.
     // Player 1 holds Left short end (facing right -> +90deg CW).
@@ -156,6 +277,7 @@ interface ActiveJoystickTracker {
 export interface MobileControlsOptions {
   container: HTMLElement;
   inputManager: InputManager;
+  devicePlatform?: DevicePlatform;
   forceEnabled?: boolean | null;
   viewportSizeProvider?: () => { width: number; height: number };
   canvasFactory?: (w: number, h: number) => HTMLCanvasElement;
@@ -172,7 +294,10 @@ export class MobileControls {
   private readonly viewportSizeProvider: () => { width: number; height: number };
   private readonly canvasFactory: (w: number, h: number) => HTMLCanvasElement;
   private readonly storage: Storage | null;
+  private readonly hasCustomViewportProvider: boolean;
 
+  private explicitDevicePlatform: DevicePlatform | undefined;
+  private devicePlatform: DevicePlatform;
   private forceEnabled: boolean | null;
   private detectedTouch = false;
   private sessionActive = false;
@@ -221,6 +346,9 @@ export class MobileControls {
         ? localStorage
         : null;
 
+    this.explicitDevicePlatform = options.devicePlatform;
+    this.hasCustomViewportProvider = options.viewportSizeProvider !== undefined;
+
     this.forceEnabled =
       options.forceEnabled !== undefined
         ? options.forceEnabled
@@ -242,10 +370,13 @@ export class MobileControls {
         return c;
       });
 
-    this.detectedTouch = this.detectTouchEnvironment();
+    this.devicePlatform =
+      options.devicePlatform ?? detectDevicePlatform();
+    this.detectedTouch = this.devicePlatform === 'mobile';
 
     this.rootEl = document.createElement('div');
     this.rootEl.className = 'shift-mobile-controls is-hidden';
+    this.rootEl.setAttribute('data-device-platform', this.devicePlatform);
     this.container.appendChild(this.rootEl);
 
     this.boundPointerMove = (e: Event) =>
@@ -257,8 +388,13 @@ export class MobileControls {
     this.boundFirstTouch = (e: Event) => {
       const pe = e as PointerEvent;
       if (e.type === 'touchstart' || pe.pointerType === 'touch') {
+        if (this.isConfirmedDesktopPc()) {
+          return;
+        }
         if (!this.detectedTouch) {
           this.detectedTouch = true;
+          this.devicePlatform = 'mobile';
+          this.rootEl.setAttribute('data-device-platform', this.devicePlatform);
           if (this.sessionActive) {
             this.render();
           }
@@ -308,27 +444,93 @@ export class MobileControls {
     }
   }
 
-  private detectTouchEnvironment(): boolean {
-    if (typeof window === 'undefined') return false;
-    if (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) {
+  private isConfirmedDesktopPc(): boolean {
+    if (this.explicitDevicePlatform === 'pc') {
       return true;
     }
-    if (
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(pointer: coarse)').matches
-    ) {
+    if (this.explicitDevicePlatform === 'mobile') {
+      return false;
+    }
+    if (typeof window === 'undefined') {
       return true;
     }
     const params = new URLSearchParams(window.location?.search ?? '');
-    if (params.get('mobile') === '1' || params.get('touch') === '1') {
+    const platformParam = params.get('platform')?.toLowerCase();
+    if (
+      platformParam === 'pc' ||
+      params.get('pc') === '1' ||
+      params.get('mobile') === '0' ||
+      params.get('touch') === '0'
+    ) {
+      return true;
+    }
+    if (
+      platformParam === 'mobile' ||
+      params.get('mobile') === '1' ||
+      params.get('touch') === '1'
+    ) {
+      return false;
+    }
+    if (
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(hover: hover) and (pointer: fine)').matches
+    ) {
+      return true;
+    }
+    const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+    const ua = nav?.userAgent ?? '';
+    const uaDataMobile = (
+      nav as (Navigator & { userAgentData?: { mobile?: boolean } }) | undefined
+    )?.userAgentData?.mobile;
+    if (uaDataMobile === false) {
+      return true;
+    }
+    if (
+      DESKTOP_OS_UA_REGEX.test(ua) &&
+      !MOBILE_UA_REGEX.test(ua) &&
+      !(nav?.platform === 'MacIntel' && (nav?.maxTouchPoints ?? 0) > 1)
+    ) {
       return true;
     }
     return false;
   }
 
+  private getEffectiveLayoutPlatform(): DevicePlatform {
+    if (this.explicitDevicePlatform !== undefined) {
+      return this.explicitDevicePlatform;
+    }
+    if (this.devicePlatform === 'mobile') {
+      return 'mobile';
+    }
+    if (!this.isConfirmedDesktopPc() && this.hasCustomViewportProvider) {
+      const { width, height } = this.viewportSizeProvider();
+      if (Math.min(width, height) < 500) {
+        return 'mobile';
+      }
+    }
+    return 'pc';
+  }
+
+  public getDevicePlatform(): DevicePlatform {
+    return this.devicePlatform;
+  }
+
+  public setDevicePlatform(platform: DevicePlatform): void {
+    this.explicitDevicePlatform = platform;
+    this.devicePlatform = platform;
+    this.detectedTouch = platform === 'mobile';
+    this.rootEl.setAttribute('data-device-platform', this.devicePlatform);
+    if (this.sessionActive) {
+      this.render();
+    }
+  }
+
   public isEnabled(): boolean {
     if (this.forceEnabled !== null) {
       return this.forceEnabled;
+    }
+    if (this.devicePlatform === 'pc') {
+      return false;
     }
     return this.detectedTouch;
   }
@@ -369,11 +571,17 @@ export class MobileControls {
       return;
     }
     const { width, height } = this.viewportSizeProvider();
-    const layout = computeLocalCoopStationRotations(width, height);
+    const layoutPlatform = this.getEffectiveLayoutPlatform();
+    const layout = computeLocalCoopStationRotations(
+      width,
+      height,
+      layoutPlatform
+    );
     this.p1RotationDeg = layout.p1RotationDeg;
     this.p2RotationDeg = layout.p2RotationDeg;
 
     this.rootEl.setAttribute('data-split-axis', layout.splitAxis);
+    this.rootEl.setAttribute('data-device-platform', layoutPlatform);
 
     const slotFirst = this.rootEl.querySelector('.slot-first');
     const slotSecond = this.rootEl.querySelector('.slot-second');
@@ -401,9 +609,10 @@ export class MobileControls {
     ) => {
       if (!stationEl) return;
       stationEl.setAttribute('data-rotation', String(rotationDeg));
+      const isRotatedQuarterTurn = Math.abs(rotationDeg % 180) === 90;
       if (layout.splitAxis === 'horizontal') {
-        const stationW = height;
-        const stationH = Math.round(width / 2);
+        const stationW = isRotatedQuarterTurn ? height : Math.round(width / 2);
+        const stationH = isRotatedQuarterTurn ? Math.round(width / 2) : height;
         stationEl.style.width = `${stationW}px`;
         stationEl.style.height = `${stationH}px`;
         stationEl.style.transform = `rotate(${rotationDeg}deg)`;
@@ -534,10 +743,16 @@ export class MobileControls {
 
   private renderLocalHeadToHead(): void {
     const { width, height } = this.viewportSizeProvider();
-    const layout = computeLocalCoopStationRotations(width, height);
+    const layoutPlatform = this.getEffectiveLayoutPlatform();
+    const layout = computeLocalCoopStationRotations(
+      width,
+      height,
+      layoutPlatform
+    );
     this.p1RotationDeg = layout.p1RotationDeg;
     this.p2RotationDeg = layout.p2RotationDeg;
     this.rootEl.setAttribute('data-split-axis', layout.splitAxis);
+    this.rootEl.setAttribute('data-device-platform', layoutPlatform);
 
     const slotA = document.createElement('div');
     slotA.className = 'mobile-station-slot slot-first';

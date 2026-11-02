@@ -1,6 +1,7 @@
 import {
   CommonKeyBindings,
   ConnectionState,
+  DevicePlatform,
   IAudioManager,
   IInputManager,
   IPeerManager,
@@ -34,6 +35,7 @@ export interface MenuCallbacks {
   onLobbyConfigChange?: (config: LobbyConfig) => void;
   onMobileControlsChange?: (forceEnabled: boolean | null) => void;
   getMobileControlsForceState?: () => boolean | null;
+  getDevicePlatform?: () => DevicePlatform;
   onCameraZoomChange?: (zoom: number) => void;
   getCameraZoom?: () => number;
   onWindowScaleModeChange?: (mode: WindowScaleMode) => void;
@@ -1078,10 +1080,18 @@ export class MenuSystem {
     )}" to Ping your partner.`;
     card.appendChild(body2);
 
-    const mobileNote = document.createElement('p');
-    mobileNote.textContent =
-      'Mobile Local Co-op: Hold opposite ends of the phone long ways — Left thumb controls movement, Right thumb controls actions and shifting.';
-    card.appendChild(mobileNote);
+    const platform = this.callbacks.getDevicePlatform?.() ?? 'pc';
+    if (platform === 'mobile') {
+      const mobileNote = document.createElement('p');
+      mobileNote.textContent =
+        'Mobile Local Co-op: Hold opposite ends of the phone long ways — Left thumb controls movement, Right thumb controls actions and shifting.';
+      card.appendChild(mobileNote);
+    } else {
+      const pcNote = document.createElement('p');
+      pcNote.textContent =
+        'PC Local Co-op: Side-by-side split screen — Left Player and Right Player share the keyboard.';
+      card.appendChild(pcNote);
+    }
 
     const warning = document.createElement('p');
     warning.innerHTML =

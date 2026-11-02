@@ -506,6 +506,7 @@ export interface ShiftRequestState {
 }
 
 export type PlayMode = 'local' | 'online';
+export type DevicePlatform = 'pc' | 'mobile';
 export type PartnerVisibilityMode = 'strict' | 'echo';
 export type ShiftMode = 'cooperative' | 'individual';
 export type WindowScaleMode = 'fit' | 'integer' | 'stretch' | 'native';

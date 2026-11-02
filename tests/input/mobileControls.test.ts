@@ -5,6 +5,7 @@ import {
   MobileControls,
   computeJoystickState,
   computeLocalCoopStationRotations,
+  detectDevicePlatform,
   transformScreenDeltaToLocal,
 } from '../../src/input/mobileControls';
 
@@ -91,6 +92,100 @@ describe('MobileControls', () => {
       expect(portrait.p1RotationDeg).toBe(0);
       expect(portrait.p2RotationDeg).toBe(180);
       expect(Math.abs(portrait.p1RotationDeg - portrait.p2RotationDeg)).toBe(180);
+
+      // PC platform: Always side-by-side upright (0 deg / 0 deg, horizontal split), never facing off
+      const pcLandscape = computeLocalCoopStationRotations(1920, 1080, 'pc');
+      expect(pcLandscape).toEqual({
+        splitAxis: 'horizontal',
+        p1RotationDeg: 0,
+        p2RotationDeg: 0,
+      });
+      const pcPortrait = computeLocalCoopStationRotations(900, 1200, 'pc');
+      expect(pcPortrait).toEqual({
+        splitAxis: 'horizontal',
+        p1RotationDeg: 0,
+        p2RotationDeg: 0,
+      });
+    });
+
+    it('accurately discerns PC vs Mobile platform even when a PC reports maxTouchPoints > 0', () => {
+      // Linux / Windows PC with maxTouchPoints > 0 and fine mouse pointer -> 'pc'
+      expect(
+        detectDevicePlatform({
+          userAgent:
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+          platform: 'Linux x86_64',
+          maxTouchPoints: 10,
+          userAgentDataMobile: false,
+          matchMedia: (q) => ({
+            matches: q === '(hover: hover) and (pointer: fine)',
+          }),
+        })
+      ).toBe('pc');
+
+      // Windows desktop where maxTouchPoints is 1 (e.g. touchscreen monitor or virtual driver) -> 'pc'
+      expect(
+        detectDevicePlatform({
+          userAgent:
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+          platform: 'Win32',
+          maxTouchPoints: 1,
+          matchMedia: (q) => ({
+            matches: q === '(hover: hover) and (pointer: fine)',
+          }),
+        })
+      ).toBe('pc');
+
+      // Android Phone -> 'mobile'
+      expect(
+        detectDevicePlatform({
+          userAgent:
+            'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
+          platform: 'Linux armv81',
+          maxTouchPoints: 5,
+          userAgentDataMobile: true,
+          matchMedia: (q) => ({
+            matches: q === '(pointer: coarse)',
+          }),
+        })
+      ).toBe('mobile');
+
+      // iPhone -> 'mobile'
+      expect(
+        detectDevicePlatform({
+          userAgent:
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+          platform: 'iPhone',
+          maxTouchPoints: 5,
+        })
+      ).toBe('mobile');
+
+      // iPadOS 13+ requesting desktop site (MacIntel + maxTouchPoints > 1 + coarse pointer) -> 'mobile'
+      expect(
+        detectDevicePlatform({
+          userAgent:
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+          platform: 'MacIntel',
+          maxTouchPoints: 5,
+          matchMedia: (q) => ({
+            matches: q === '(pointer: coarse)',
+          }),
+        })
+      ).toBe('mobile');
+
+      // URL query overrides (?platform=mobile, ?platform=pc, ?mobile=0)
+      expect(
+        detectDevicePlatform({
+          userAgent: 'Mozilla/5.0 (X11; Linux x86_64)',
+          urlSearch: '?platform=mobile',
+        })
+      ).toBe('mobile');
+      expect(
+        detectDevicePlatform({
+          userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X)',
+          urlSearch: '?platform=pc',
+        })
+      ).toBe('pc');
     });
   });
 
@@ -493,6 +588,48 @@ describe('MobileControls', () => {
       expect(drawImageSpies.length).toBe(2);
       expect(drawImageSpies[0]).toHaveBeenCalledWith(mainCanvas, 0, 0, 500, 650, 0, 0, 500, 650);
       expect(drawImageSpies[1]).toHaveBeenCalledWith(mainCanvas, 500, 0, 500, 650, 0, 0, 500, 650);
+    });
+
+    it('keeps mobile controls hidden by default on PC and uses side-by-side (0 deg / 0 deg) rather than facing off even if forced on PC', () => {
+      mobile = new MobileControls({
+        container,
+        inputManager: input,
+        devicePlatform: 'pc',
+        forceEnabled: null,
+        viewportSizeProvider: () => ({ width: 1920, height: 1080 }),
+      });
+
+      mobile.setSessionMode('local', 1, true);
+      expect(mobile.getDevicePlatform()).toBe('pc');
+      expect(mobile.isEnabled()).toBe(false);
+      expect(
+        container
+          .querySelector('.shift-mobile-controls')
+          ?.classList.contains('is-hidden')
+      ).toBe(true);
+
+      // Even if a stray touchstart fires on a PC touchscreen laptop, Auto mode stays disabled on PC
+      window.dispatchEvent(new Event('touchstart'));
+      expect(mobile.isEnabled()).toBe(false);
+
+      // If the user explicitly forces Touch Controls ON on a PC, Local Co-op must still be side-by-side (0 deg / 0 deg), never facing off!
+      mobile.setForceEnabled(true);
+      expect(mobile.isEnabled()).toBe(true);
+
+      const station1 = container.querySelector(
+        '[data-testid="mobile-station-p1"]'
+      ) as HTMLElement;
+      const station2 = container.querySelector(
+        '[data-testid="mobile-station-p2"]'
+      ) as HTMLElement;
+      expect(station1).toBeTruthy();
+      expect(station2).toBeTruthy();
+      expect(station1.getAttribute('data-rotation')).toBe('0');
+      expect(station2.getAttribute('data-rotation')).toBe('0');
+      expect(station1.style.width).toBe('960px');
+      expect(station1.style.height).toBe('1080px');
+      expect(station2.style.width).toBe('960px');
+      expect(station2.style.height).toBe('1080px');
     });
   });
 });

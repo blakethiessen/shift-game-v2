@@ -23,6 +23,7 @@ import {
   DIM_HEIGHT_TILES,
   DIM_WIDTH_PX,
   DIM_WIDTH_TILES,
+  DevicePlatform,
   FULL_VIEWPORT_HEIGHT_PX,
   FULL_VIEWPORT_WIDTH_PX,
   GameEvent,
@@ -53,6 +54,7 @@ export interface ShiftGameAppOptions {
   inputTarget?: EventTarget | null;
   autoStartLoop?: boolean;
   seed?: number;
+  devicePlatform?: DevicePlatform;
   mobileControlsEnabled?: boolean | null;
 }
 
@@ -125,6 +127,7 @@ export class ShiftGameApp {
     this.mobileControls = new MobileControls({
       container: this.container,
       inputManager: this.inputManager,
+      devicePlatform: options.devicePlatform,
       forceEnabled: options.mobileControlsEnabled ?? null,
       canvasFactory: options.canvasFactory,
       onZoomDelta: (delta) => {
@@ -236,6 +239,7 @@ export class ShiftGameApp {
         },
         getMobileControlsForceState: () =>
           this.mobileControls.getForceEnabled(),
+        getDevicePlatform: () => this.mobileControls.getDevicePlatform(),
         onCameraZoomChange: (zoom) => {
           this.setCameraZoom(zoom);
         },
@@ -256,6 +260,10 @@ export class ShiftGameApp {
     if (options.autoStartLoop !== false && typeof window !== 'undefined') {
       this.startAnimationFrameLoop();
     }
+  }
+
+  public getDevicePlatform(): DevicePlatform {
+    return this.mobileControls.getDevicePlatform();
   }
 
   public setSpritesheet(image: CanvasImageSource): void {

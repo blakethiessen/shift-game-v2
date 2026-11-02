@@ -1,8 +1,8 @@
 // src/renderer/gameRenderer.ts
 // Hardware-accelerated 2D Canvas renderer implementing IGameRenderer.
 // Supports both Local Co-op (1000x650 dual viewport) and Online P2P Co-op (500x650
-// single-dimension viewport with Final Room convergence, Partner Echo, Same-Tile
-// Convergence Panic, synthesized ghost wall shimmer, and Online Co-op HUD overlays).
+// single-dimension viewport with Final Room convergence, Partner Echo,
+// Damage Vignette, synthesized ghost wall shimmer, and Online Co-op HUD overlays).
 
 import {
   DIM_WIDTH_PX,
@@ -15,6 +15,7 @@ import {
   DimensionSide,
   Direction,
   GameState,
+  HealthState,
   IGameRenderer,
   PlayMode,
   PlayerId,
@@ -535,9 +536,10 @@ export class GameRenderer implements IGameRenderer {
       );
     }
 
-    // Same-Tile Convergence Panic dread vignette around viewport edges (distance <= 2)
-    if (state.convergenceDistance <= 2) {
-      this.renderConvergenceVignette(state.convergenceDistance);
+    // Damage pulsing red vignette around viewport edges when players are injured
+    const worstHealth = this.getWorstPlayerHealthState(state, options);
+    if (worstHealth !== 'Normal') {
+      this.renderDamageVignette(worstHealth);
     }
 
     // Cooperative Shift HUD & Partner Door / Ping Overlays
@@ -613,11 +615,6 @@ export class GameRenderer implements IGameRenderer {
     this.ctx.clip();
 
     this.renderDimensionWorldAndEntities(state, side, player, offsetX);
-
-    // Same-Tile Convergence === 0: trembling red/static dimensional-bleed ring beneath feet (even in strict mode!)
-    if (state.convergenceDistance === 0) {
-      this.renderSameTileBleedRing(player.x + offsetX, player.y);
-    }
 
     // Partner Echo in Online Mode when partnerVisibility === 'echo'
     if (options.mode === 'online' && options.partnerVisibility === 'echo') {
@@ -924,27 +921,6 @@ export class GameRenderer implements IGameRenderer {
     this.ctx.restore();
   }
 
-  private renderSameTileBleedRing(centerXLeft: number, centerYTop: number): void {
-    const cx = centerXLeft + TILE_SIZE_PX / 2;
-    const cy = centerYTop + TILE_SIZE_PX / 2;
-    const jitterX = Math.sin(this.elapsedTimeMs * 0.09) * 2.5;
-    const jitterY = Math.cos(this.elapsedTimeMs * 0.11) * 2.5;
-
-    this.ctx.save();
-    this.ctx.strokeStyle = 'rgba(239, 68, 68, 0.92)';
-    this.ctx.lineWidth = 2.5;
-    this.ctx.beginPath();
-    this.ctx.arc(cx + jitterX, cy + jitterY, 16, 0, Math.PI * 2);
-    this.ctx.stroke();
-
-    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
-    this.ctx.lineWidth = 1;
-    this.ctx.beginPath();
-    this.ctx.arc(cx - jitterX, cy - jitterY, 12, 0, Math.PI * 2);
-    this.ctx.stroke();
-    this.ctx.restore();
-  }
-
   private renderFloatingInventoryOverlay(
     state: GameState,
     player: PlayerState,
@@ -1103,14 +1079,51 @@ export class GameRenderer implements IGameRenderer {
     this.ctx.restore();
   }
 
-  private renderConvergenceVignette(convergenceDistance: number): void {
+  private getWorstPlayerHealthState(
+    state: GameState,
+    options: RenderOptions
+  ): HealthState {
+    const relevantPlayers =
+      options.mode === 'local'
+        ? state.players
+        : [state.players[options.localPlayerId - 1] ?? state.players[0]];
+    if (relevantPlayers.some((p) => p.isAlive && p.healthState === 'Dying')) {
+      return 'Dying';
+    }
+    if (relevantPlayers.some((p) => p.isAlive && p.healthState === 'Injured')) {
+      return 'Injured';
+    }
+    if (relevantPlayers.some((p) => p.isAlive && p.healthState === 'Bruised')) {
+      return 'Bruised';
+    }
+    return 'Normal';
+  }
+
+  private renderDamageVignette(healthState: Exclude<HealthState, 'Normal'>): void {
     const w = this.canvas.width;
     const h = this.canvas.height;
     const cx = w / 2;
     const cy = h / 2;
     const maxR = Math.hypot(cx, cy);
-    const pulse = (Math.sin(this.elapsedTimeMs * 0.012) + 1) * 0.5;
-    const baseAlpha = convergenceDistance === 0 ? 0.55 : 0.28;
+    const freq =
+      healthState === 'Dying'
+        ? 0.018
+        : healthState === 'Injured'
+          ? 0.012
+          : 0.008;
+    const baseAlpha =
+      healthState === 'Dying'
+        ? 0.5
+        : healthState === 'Injured'
+          ? 0.28
+          : 0.16;
+    const pulseRange =
+      healthState === 'Dying'
+        ? 0.25
+        : healthState === 'Injured'
+          ? 0.18
+          : 0.1;
+    const pulse = (Math.sin(this.elapsedTimeMs * freq) + 1) * 0.5;
 
     this.ctx.save();
     const grd = this.ctx.createRadialGradient(
@@ -1122,7 +1135,7 @@ export class GameRenderer implements IGameRenderer {
       maxR
     );
     grd.addColorStop(0, 'transparent');
-    grd.addColorStop(1, `rgba(220, 38, 38, ${baseAlpha + pulse * 0.2})`);
+    grd.addColorStop(1, `rgba(220, 38, 38, ${baseAlpha + pulse * pulseRange})`);
     this.ctx.fillStyle = grd;
     this.ctx.fillRect(0, 0, w, h);
     this.ctx.restore();

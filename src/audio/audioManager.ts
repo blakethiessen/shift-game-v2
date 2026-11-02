@@ -633,25 +633,21 @@ export class AudioManager implements IAudioManager {
       muffleFire ? CROSS_DIM_GAIN_FACTOR * this.sfxVolume : this.sfxVolume
     );
 
-    // 3. HeartBeat Loop (Injured/Dying or convergenceDistance <= 2, ramping at 0)
+    // 3. HeartBeat Loop (Injured or Dying health state, ramping when Dying)
     const relevantPlayers = mode === 'local' ? state.players : [localPlayer];
+    const isDying = relevantPlayers.some(
+      (p) => p.isAlive && p.healthState === 'Dying'
+    );
     const isInjuredOrDying = relevantPlayers.some(
       (p) =>
         p.isAlive && (p.healthState === 'Injured' || p.healthState === 'Dying')
     );
-    const isConverging = state.convergenceDistance <= 2;
-    const shouldPlayHeartbeat = isInjuredOrDying || isConverging;
+    const shouldPlayHeartbeat = isInjuredOrDying;
     let hbRate = 1.0;
     let hbGain = this.sfxVolume * 0.8;
-    if (state.convergenceDistance === 0) {
-      hbRate = 1.5;
-      hbGain = Math.min(1.0, this.sfxVolume * 1.25);
-    } else if (
-      state.convergenceDistance <= 2 ||
-      relevantPlayers.some((p) => p.healthState === 'Dying')
-    ) {
-      hbRate = 1.2;
-      hbGain = this.sfxVolume * 0.9;
+    if (isDying) {
+      hbRate = 1.35;
+      hbGain = Math.min(1.0, this.sfxVolume * 1.15);
     }
     this.setLoopState(
       'heartBeat',
@@ -741,9 +737,17 @@ export class AudioManager implements IAudioManager {
     }
     for (const loop of Object.values(this.activeLoops)) {
       if (loop && loop.active) {
-        const baseGain = loop.muffled
-          ? CROSS_DIM_GAIN_FACTOR * this.sfxVolume
-          : this.sfxVolume;
+        let baseGain: number;
+        if (loop.key === 'heartBeat') {
+          baseGain =
+            loop.playbackRate > 1.0
+              ? Math.min(1.0, this.sfxVolume * 1.15)
+              : this.sfxVolume * 0.8;
+        } else {
+          baseGain = loop.muffled
+            ? CROSS_DIM_GAIN_FACTOR * this.sfxVolume
+            : this.sfxVolume;
+        }
         loop.updateParams(loop.muffled, loop.playbackRate, baseGain);
       }
     }

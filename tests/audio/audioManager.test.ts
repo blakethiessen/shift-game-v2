@@ -395,24 +395,40 @@ describe('AudioManager', () => {
       expect(audio.getActiveLoops().fire?.active).toBeFalsy();
     });
 
-    it('activates heartBeat loop when Injured/Dying or convergenceDistance <= 2 and ramps playbackRate at convergenceDistance === 0', () => {
+    it('does not play heartBeat at spawn when healthy (even at convergenceDistance === 0), and activates heartBeat when Injured or Dying', () => {
       const state = createMockGameState();
-      state.convergenceDistance = 5;
+      state.convergenceDistance = 0;
+      state.players[0].healthState = 'Normal';
+      state.players[1].healthState = 'Normal';
       audio.updateAmbientAndLoops(state, 1, 'local');
       expect(audio.getActiveLoops().heartBeat?.active).toBeFalsy();
 
-      // Convergence distance <= 2 triggers heartbeat
-      state.convergenceDistance = 2;
+      // Bruised does not trigger heartBeat
+      state.players[0].healthState = 'Bruised';
       audio.updateAmbientAndLoops(state, 1, 'local');
-      expect(audio.getActiveLoops().heartBeat?.active).toBe(true);
-      const rateAt2 = audio.getActiveLoops().heartBeat!.playbackRate;
+      expect(audio.getActiveLoops().heartBeat?.active).toBeFalsy();
 
-      // Convergence distance === 0 ramps up playback rate & volume
-      state.convergenceDistance = 0;
+      // Injured player triggers heartbeat
+      state.players[0].healthState = 'Injured';
       audio.updateAmbientAndLoops(state, 1, 'local');
       expect(audio.getActiveLoops().heartBeat?.active).toBe(true);
-      expect(audio.getActiveLoops().heartBeat!.playbackRate).toBeGreaterThan(rateAt2);
+      const rateWhenInjured = audio.getActiveLoops().heartBeat!.playbackRate;
+
+      // In online mode, healthy local player (P2) does not hear heartbeat when only partner (P1) is Injured
+      audio.updateAmbientAndLoops(state, 2, 'online');
+      expect(audio.getActiveLoops().heartBeat?.active).toBeFalsy();
+
+      // Dying player ramps up playback rate & volume
+      state.players[0].healthState = 'Dying';
+      audio.updateAmbientAndLoops(state, 1, 'local');
+      expect(audio.getActiveLoops().heartBeat?.active).toBe(true);
+      expect(audio.getActiveLoops().heartBeat!.playbackRate).toBeGreaterThan(rateWhenInjured);
       expect(audio.getActiveLoops().heartBeat!.gain).toBeGreaterThan(audio.getSFXVolume() * 0.8);
+
+      // Healing back to Bruised or dying (isAlive = false) stops the heartBeat loop
+      state.players[0].healthState = 'Bruised';
+      audio.updateAmbientAndLoops(state, 1, 'local');
+      expect(audio.getActiveLoops().heartBeat?.active).toBeFalsy();
     });
 
     it('activates blobbyTracking loop when any Blobby is in Seeking state and stops when wandering', () => {

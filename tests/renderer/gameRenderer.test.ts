@@ -475,7 +475,7 @@ describe('gameRenderer', () => {
   });
 
   describe('Horror & Online Co-op Overlays', () => {
-    it('renders Same-Tile Convergence Panic vignette (<= 2) and trembling static bleed ring at distance === 0 even in strict mode', () => {
+    it('does not render red damage vignette at spawn when players are at Normal health (even when convergenceDistance === 0), and renders pulsing red vignette when damaged (Bruised, Injured, Dying)', () => {
       const { canvas, ctx } = createMockCanvasAndCtx();
       const offscreenFactory = () => createMockCanvasAndCtx().canvas;
       const renderer = new GameRenderer(
@@ -484,27 +484,120 @@ describe('gameRenderer', () => {
         offscreenFactory
       );
 
-      const state = createMockGameState({
+      // At initial spawn, both players are at (225, 325) with Normal health and convergenceDistance === 0
+      const healthySpawnState = createMockGameState({
         convergenceDistance: 0,
         players: [
-          createPlayer(1, { x: 200, y: 200 }),
-          createPlayer(2, { x: 200, y: 200 }),
+          createPlayer(1, { x: 225, y: 325, healthState: 'Normal', speed: 2.0 }),
+          createPlayer(2, { x: 225, y: 325, healthState: 'Normal', speed: 2.0 }),
         ],
       });
 
       renderer.render(
-        state,
+        healthySpawnState,
         {
           localPlayerId: 1,
-          mode: 'online',
+          mode: 'local',
           partnerVisibility: 'strict',
           lightingEnabled: false,
         },
         16.67
       );
 
-      expect(ctx.arc).toHaveBeenCalled();
-      expect(ctx.createRadialGradient).toHaveBeenCalled();
+      expect(ctx.createRadialGradient).not.toHaveBeenCalled();
+      expect(ctx.arc).not.toHaveBeenCalled();
+
+      // When a player is damaged (Bruised, Injured, Dying), red vignette renders
+      const bruisedState = createMockGameState({
+        players: [
+          createPlayer(1, { x: 100, y: 200, healthState: 'Bruised', speed: 1.5 }),
+          createPlayer(2, { x: 300, y: 200, healthState: 'Normal', speed: 2.0 }),
+        ],
+      });
+      renderer.render(
+        bruisedState,
+        {
+          localPlayerId: 1,
+          mode: 'local',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+      expect(ctx.createRadialGradient).toHaveBeenCalledTimes(1);
+
+      const injuredState = createMockGameState({
+        convergenceDistance: 8,
+        players: [
+          createPlayer(1, { x: 100, y: 200, healthState: 'Injured', speed: 1.0 }),
+          createPlayer(2, { x: 300, y: 200, healthState: 'Normal', speed: 2.0 }),
+        ],
+      });
+      renderer.render(
+        injuredState,
+        {
+          localPlayerId: 1,
+          mode: 'local',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+      expect(ctx.createRadialGradient).toHaveBeenCalledTimes(2);
+
+      // In online mode, partner being Injured does not render vignette on healthy local player's screen
+      ctx.createRadialGradient.mockClear();
+      renderer.render(
+        injuredState,
+        {
+          localPlayerId: 2,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+      expect(ctx.createRadialGradient).not.toHaveBeenCalled();
+
+      // When local player in online mode is Dying, vignette renders
+      const dyingOnlineState = createMockGameState({
+        players: [
+          createPlayer(1, { x: 100, y: 200, healthState: 'Normal', speed: 2.0 }),
+          createPlayer(2, { x: 300, y: 200, healthState: 'Dying', speed: 0.6 }),
+        ],
+      });
+      renderer.render(
+        dyingOnlineState,
+        {
+          localPlayerId: 2,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+      expect(ctx.createRadialGradient).toHaveBeenCalledTimes(1);
+
+      // When players are dead (isAlive: false during 'dying' phase), continuous damage vignette stops
+      ctx.createRadialGradient.mockClear();
+      const deadState = createMockGameState({
+        phase: 'dying',
+        players: [
+          createPlayer(1, { healthState: 'Dying', isAlive: false }),
+          createPlayer(2, { healthState: 'Dying', isAlive: false }),
+        ],
+      });
+      renderer.render(
+        deadState,
+        {
+          localPlayerId: 1,
+          mode: 'local',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+      expect(ctx.createRadialGradient).not.toHaveBeenCalled();
     });
 
     it('renders Cooperative Shift HUD banner, countdown bar, and wall collision hazard warning', () => {

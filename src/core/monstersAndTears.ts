@@ -546,11 +546,14 @@ export function spawnInitialTearsForRoom(
   state: GameState,
   rng: SeededRandom
 ): void {
-  if (state.roomsEntered <= 0) return;
+  // First 3 rooms are guaranteed to have no cracks.
+  if (state.roomsEntered <= 3) return;
 
+  // From room 4 onwards, ramp up crack possibility starting gently (effective rooms = 1 at room 4, 2 at room 5)
+  const effectiveRooms = state.roomsEntered - 3;
   let numCracks = 0;
   let minimumValue = 0.01;
-  while (Math.pow(rng.nextFloat(), state.roomsEntered) < minimumValue) {
+  while (Math.pow(rng.nextFloat(), effectiveRooms) < minimumValue) {
     numCracks++;
     minimumValue /= 10;
   }

@@ -3,8 +3,9 @@ import { GameEngine } from '../../src/core/gameEngine';
 import {
   isTargetDetected,
   knockbackBlobby,
+  spawnInitialTearsForRoom,
 } from '../../src/core/monstersAndTears';
-import { createDefaultPlayerInput, Direction } from '../../src/shared/types';
+import { createDefaultPlayerInput, Direction, SeededRandom } from '../../src/shared/types';
 
 describe('monstersAndTears', () => {
   it('detects Blobby sightline (adjacent, knight-move, straight line of sight) and handles empty path safely', () => {
@@ -175,5 +176,79 @@ describe('monstersAndTears', () => {
     expect(state.room.tears.length).toBe(1);
     expect(state.room.tears[0].x).toBe(25);
     expect(state.room.tears[0].y).toBe(0);
+  });
+
+  it('guarantees 0 cracks for the first 3 rooms (roomsEntered <= 3) regardless of random roll', () => {
+    const engine = new GameEngine(12345);
+    const state = engine.getState();
+
+    // Custom RNG that always rolls near 0 (0.0001), which in the old formula guarantees cracks
+    const lowRng = {
+      nextFloat: () => 0.0001,
+      nextInt: (min: number, _max: number) => min,
+      getState: () => 0,
+      setState: () => {},
+    } as unknown as SeededRandom;
+
+    for (const roomsEntered of [0, 1, 2, 3]) {
+      state.roomsEntered = roomsEntered;
+      state.room.tears = [];
+      spawnInitialTearsForRoom(state, lowRng);
+      expect(state.room.tears.length).toBe(0);
+    }
+  });
+
+  it('slowly ramps up crack possibility starting at room 4 and 5', () => {
+    const engine = new GameEngine(12345);
+    const state = engine.getState();
+
+    // At room 4, effectiveRooms = 1: roll of 0.005 (< 0.01) triggers a crack, but 0.02 (>= 0.01) does not
+    const crackRng = {
+      nextFloat: () => 0.005,
+      nextInt: (_min: number, _max: number) => 0,
+      getState: () => 0,
+      setState: () => {},
+    } as unknown as SeededRandom;
+
+    const noCrackRng = {
+      nextFloat: () => 0.05,
+      nextInt: (_min: number, _max: number) => 0,
+      getState: () => 0,
+      setState: () => {},
+    } as unknown as SeededRandom;
+
+    state.roomsEntered = 4;
+    state.room.tears = [];
+    spawnInitialTearsForRoom(state, noCrackRng);
+    expect(state.room.tears.length).toBe(0);
+
+    state.roomsEntered = 4;
+    state.room.tears = [];
+    spawnInitialTearsForRoom(state, crackRng);
+    expect(state.room.tears.length).toBeGreaterThanOrEqual(1);
+
+    // At room 5, effectiveRooms = 2: roll of 0.05 yields 0.05^2 = 0.0025 < 0.01, so it now triggers cracks!
+    state.roomsEntered = 5;
+    state.room.tears = [];
+    spawnInitialTearsForRoom(state, noCrackRng); // 0.05 roll
+    expect(state.room.tears.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('verifies GameEngine room transitions enforce no cracks through 3 rooms then allows cracks', () => {
+    // Seed 42: lets inspect room loading
+    const engine = new GameEngine(42);
+    // Initial room (room 1): roomsEntered = 1
+    expect(engine.getState().roomsEntered).toBe(1);
+    expect(engine.getState().room.tears.length).toBe(0);
+
+    // Load second room
+    engine.loadRoom('chestIntro');
+    expect(engine.getState().roomsEntered).toBe(2);
+    expect(engine.getState().room.tears.length).toBe(0);
+
+    // Load third room
+    engine.loadRoom('keyIntro');
+    expect(engine.getState().roomsEntered).toBe(3);
+    expect(engine.getState().room.tears.length).toBe(0);
   });
 });

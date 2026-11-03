@@ -504,4 +504,168 @@ describe('MenuSystem', () => {
     );
     expect(peer.joinRoom).toHaveBeenCalledWith('K7M9P');
   });
+
+  it('supports navigating menus, starting the game, rebinding controls, and toggling Single Controller target with a Gamepad', () => {
+    let btns = Array.from({ length: 16 }, () => ({ pressed: false, value: 0 }));
+    let axes = [0, 0, 0, 0];
+    const mockPad = () =>
+      ({
+        index: 0,
+        id: 'Standard Gamepad',
+        connected: true,
+        mapping: 'standard',
+        axes,
+        buttons: btns.map((b) => ({ ...b, touched: b.pressed })),
+        timestamp: performance.now(),
+      }) as unknown as Gamepad;
+
+    input.destroy();
+    input = new InputManager({
+      gamepadProvider: () => [mockPad()],
+    });
+    input.setEnabled(false);
+
+    const onStartLocal = vi.fn();
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: peer,
+      callbacks: { onStartLocalGame: onStartLocal },
+    });
+    menu.showScreen('start');
+
+    // Navigate Start Menu down twice (LOCAL CO-OP -> ONLINE CO-OP -> OPTIONS) with D-Pad Down (13)
+    btns[13] = { pressed: true, value: 1 };
+    input.pollGamepads();
+    btns[13] = { pressed: false, value: 0 };
+    input.pollGamepads();
+
+    btns[13] = { pressed: true, value: 1 };
+    input.pollGamepads();
+    btns[13] = { pressed: false, value: 0 };
+    input.pollGamepads();
+
+    // Press A (0) to open OPTIONS
+    btns[0] = { pressed: true, value: 1 };
+    input.pollGamepads();
+    btns[0] = { pressed: false, value: 0 };
+    input.pollGamepads();
+    expect(menu.getCurrentScreen()).toBe('options');
+
+    // Toggle Single Controller target button in Options (P1 Left -> P2 Right)
+    const padTargetBtn = container.querySelector(
+      '[data-testid="options-gamepad-target"]'
+    ) as HTMLButtonElement;
+    expect(padTargetBtn).toBeTruthy();
+    expect(padTargetBtn.textContent).toContain('P1');
+    padTargetBtn.click();
+    expect(input.getSingleGamepadPlayer()).toBe(2);
+    expect(
+      (container.querySelector('[data-testid="options-gamepad-target"]') as HTMLButtonElement)
+        .textContent
+    ).toContain('P2');
+
+    // Click P1 Interact Gamepad binding and press Gamepad Button 2 (PAD X) to rebind
+    const p1GamepadInteractBtn = container.querySelector(
+      '[data-gamepad-binding="p1.Interact"]'
+    ) as HTMLButtonElement;
+    expect(p1GamepadInteractBtn).toBeTruthy();
+    expect(p1GamepadInteractBtn.textContent).toContain('PAD A');
+    p1GamepadInteractBtn.click();
+    expect(
+      container.querySelector('[data-gamepad-binding="p1.Interact"]')?.textContent
+    ).toContain('[PRESS BTN]');
+
+    // Pressing a non-Escape keyboard key while [PRESS BTN] (gamepad device) is active must NOT overwrite keyboard binding
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyZ' }));
+    expect(input.getSettings().p1.Interact).toBe('Digit1');
+    expect(
+      container.querySelector('[data-gamepad-binding="p1.Interact"]')?.textContent
+    ).toContain('[PRESS BTN]');
+
+    btns[2] = { pressed: true, value: 1 };
+    input.pollGamepads();
+    btns[2] = { pressed: false, value: 0 };
+    input.pollGamepads();
+
+    // Gamepad binding updated to GamepadButton2 (PAD X), while Keyboard binding remains Digit1 (1)
+    expect(input.getGamepadSettings().p1.Interact).toBe('GamepadButton2');
+    expect(input.getSettings().p1.Interact).toBe('Digit1');
+    expect(
+      container.querySelector('[data-gamepad-binding="p1.Interact"]')?.textContent
+    ).toContain('PAD X');
+    expect(
+      container.querySelector('[data-binding="p1.Interact"]')?.textContent
+    ).toContain('1');
+
+    // Clicking Keyboard binding ([PRESS KEY]) and pressing a controller button must NOT overwrite Keyboard binding with GamepadButtonX;
+    // pressing PAD B (GamepadButton1) cancels [PRESS KEY] rebinding cleanly
+    const p1KbInteractBtn = container.querySelector(
+      '[data-binding="p1.Interact"]'
+    ) as HTMLButtonElement;
+    p1KbInteractBtn.click();
+    expect(
+      container.querySelector('[data-binding="p1.Interact"]')?.textContent
+    ).toContain('[PRESS KEY]');
+
+    btns[2] = { pressed: true, value: 1 }; // PAD X ignored while waiting for keyboard key
+    input.pollGamepads();
+    btns[2] = { pressed: false, value: 0 };
+    input.pollGamepads();
+    expect(input.getSettings().p1.Interact).toBe('Digit1');
+    expect(
+      container.querySelector('[data-binding="p1.Interact"]')?.textContent
+    ).toContain('[PRESS KEY]');
+
+    btns[1] = { pressed: true, value: 1 }; // PAD B cancels [PRESS KEY] without exiting Options
+    input.pollGamepads();
+    btns[1] = { pressed: false, value: 0 };
+    input.pollGamepads();
+    expect(menu.getCurrentScreen()).toBe('options');
+    expect(input.getSettings().p1.Interact).toBe('Digit1');
+    expect(
+      container.querySelector('[data-binding="p1.Interact"]')?.textContent
+    ).toContain('1');
+
+    // Reset Controls button restores default Keyboard & Gamepad bindings
+    const resetBtn = container.querySelector(
+      '[data-testid="options-reset-controls"]'
+    ) as HTMLButtonElement;
+    expect(resetBtn).toBeTruthy();
+    resetBtn.click();
+    expect(input.getGamepadSettings().p1.Interact).toBe('GamepadButton0');
+    expect(
+      container.querySelector('[data-gamepad-binding="p1.Interact"]')?.textContent
+    ).toContain('PAD A');
+
+    // Press B (1) on Options screen -> returns to Start Screen immediately (not swallowed after PAD X rebind!)
+    btns[1] = { pressed: true, value: 1 };
+    input.pollGamepads();
+    btns[1] = { pressed: false, value: 0 };
+    input.pollGamepads();
+    expect(menu.getCurrentScreen()).toBe('start');
+
+    // Navigate down then up back to LOCAL CO-OP (index 0) using Left Stick
+    axes = [0, 0.9, 0, 0];
+    input.pollGamepads();
+    axes = [0, 0, 0, 0];
+    input.pollGamepads();
+
+    axes = [0, -0.9, 0, 0];
+    input.pollGamepads();
+    axes = [0, 0, 0, 0];
+    input.pollGamepads();
+
+    // Press A (0) to open Tutorial, then press A (0) again to start Local Game
+    btns[0] = { pressed: true, value: 1 };
+    input.pollGamepads();
+    btns[0] = { pressed: false, value: 0 };
+    input.pollGamepads();
+    expect(menu.getCurrentScreen()).toBe('tutorial');
+
+    btns[0] = { pressed: true, value: 1 };
+    input.pollGamepads();
+    expect(onStartLocal).toHaveBeenCalledTimes(1);
+  });
 });

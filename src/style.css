@@ -313,6 +313,7 @@ input:not(input[type="range"]):user-invalid {
 }
 
 .action-btn:hover:not(:disabled),
+.action-btn:focus,
 .action-btn:focus-visible {
   background: #35494F;
   color: var(--color-highlight);
@@ -397,35 +398,85 @@ input[type="range"].retro-slider::-moz-range-thumb {
 }
 
 /* Controls Rebinding Grid */
+.controls-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.action-btn-compact {
+  font-size: 14px;
+  padding: 2px 10px;
+}
+
 .controls-columns {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
-  gap: 14px;
+  gap: 12px;
 }
 
 .controls-group {
   border: 2px solid #35494F;
-  padding: 8px 10px;
+  padding: 6px 8px;
   background: #050709;
   display: flex;
   flex-direction: column;
+  gap: 3px;
+}
+
+.controls-col-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.controls-col-sub {
+  font-size: 12px;
+  color: var(--color-muted);
+  text-decoration: none;
+  letter-spacing: 0.5px;
+}
+
+.binding-row {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr;
   gap: 4px;
 }
 
 .binding-btn {
   display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 4px;
   background: #0f161a;
   border: 1px solid #35494F;
   color: #ffffff;
   font-family: var(--font-retro);
-  font-size: 15px;
-  padding: 2px 8px;
+  font-size: 14px;
+  padding: 2px 6px;
   cursor: pointer;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.binding-btn-gamepad {
+  background: #0b1318;
+  border-color: #29404a;
+  color: #cfe6ef;
+}
+
+.gp-badge {
+  font-size: 11px;
+  color: #88aebb;
+  opacity: 0.85;
 }
 
 .binding-btn:hover,
+.binding-btn:focus,
 .binding-btn:focus-visible {
   border-color: #F9F8F6;
   color: var(--color-highlight);

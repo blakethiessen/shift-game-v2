@@ -570,4 +570,87 @@ describe('ShiftGameApp End-to-End Integration', () => {
 
     app.destroy();
   });
+
+  it('supports Local Co-op gameplay with two Gamepad controllers and dynamically updates Controls HUD and Shift prompts', () => {
+    const pad1Btns = Array.from({ length: 16 }, () => ({ pressed: false, value: 0 }));
+    const pad2Btns = Array.from({ length: 16 }, () => ({ pressed: false, value: 0 }));
+    let pad1Axes = [0, 0, 0, 0];
+    let pad2Axes = [0, 0, 0, 0];
+
+    const makePad = (
+      index: number,
+      axes: number[],
+      btns: Array<{ pressed: boolean; value: number }>
+    ) =>
+      ({
+        index,
+        id: `Controller #${index}`,
+        connected: true,
+        mapping: 'standard',
+        axes,
+        buttons: btns.map((b) => ({ ...b, touched: b.pressed })),
+        timestamp: performance.now(),
+      }) as unknown as Gamepad;
+
+    const getGamepadsSpy = vi
+      .fn(() => [makePad(0, pad1Axes, pad1Btns), makePad(1, pad2Axes, pad2Btns)]);
+    Object.defineProperty(navigator, 'getGamepads', {
+      value: getGamepadsSpy,
+      configurable: true,
+      writable: true,
+    });
+
+    const container = document.createElement('div');
+    const canvas = createMockCanvas();
+    container.appendChild(canvas);
+    document.body.appendChild(container);
+
+    const app = new ShiftGameApp({
+      container,
+      canvas,
+      canvasFactory: () => createMockCanvas(),
+      autoStartLoop: false,
+      mobileControlsEnabled: false,
+    });
+
+    app.startLocalGame({
+      mode: 'local',
+      partnerVisibility: 'strict',
+      shiftMode: 'cooperative',
+      muffledCrossDimensionAudio: true,
+    });
+
+    const p1StartX = app.getState().players[0].x;
+    const p2StartX = app.getState().players[1].x;
+
+    // Pad 0 moves P1 right via Left Stick, Pad 1 moves P2 left via D-Pad Left (14)
+    pad1Axes = [0.95, 0, 0, 0];
+    pad2Btns[14] = { pressed: true, value: 1 };
+    app.stepFrame(SIMULATION_TICK_MS);
+
+    expect(app.getState().players[0].x).toBeGreaterThan(p1StartX);
+    expect(app.getState().players[1].x).toBeLessThan(p2StartX);
+
+    // Controls HUD should now reflect Gamepad button labels for both P1 and P2
+    const controlsHud = container.querySelector(
+      '[data-testid="shift-controls-hud"]'
+    ) as HTMLElement;
+    expect(controlsHud.textContent).toContain('PAD A');
+    expect(controlsHud.textContent).toContain('PAD RB');
+
+    // Pad 0 presses RB (5) to request Cooperative Shift -> Pad 1 presses RB (5) to confirm
+    pad1Axes = [0, 0, 0, 0];
+    pad2Btns[14] = { pressed: false, value: 0 };
+    pad1Btns[5] = { pressed: true, value: 1 };
+    app.stepFrame(SIMULATION_TICK_MS);
+    expect(app.getState().shiftRequest.requestedBy).toBe(1);
+    expect(app.getState().evilOnLeft).toBe(false);
+
+    pad1Btns[5] = { pressed: false, value: 0 };
+    pad2Btns[5] = { pressed: true, value: 1 };
+    app.stepFrame(SIMULATION_TICK_MS);
+    expect(app.getState().evilOnLeft).toBe(true);
+
+    app.destroy();
+  });
 });

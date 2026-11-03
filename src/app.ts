@@ -751,7 +751,7 @@ export class ShiftGameApp {
 
   private syncControlsHudDisplay(): void {
     if (!this.controlsHudEl) return;
-    const keys = this.inputManager.getFormattedKeyStrings();
+    const keys = this.inputManager.getEffectiveKeyStrings();
     this.controlsHudEl.innerHTML = '';
 
     const innerFrame = document.createElement('div');
@@ -804,7 +804,10 @@ export class ShiftGameApp {
       return group;
     };
 
-    const p1Move = `${keys.p1.Up}/${keys.p1.Left}/${keys.p1.Down}/${keys.p1.Right}`;
+    const p1PadActive = this.inputManager.isGamepadActiveForPlayer(1);
+    const p1Move = p1PadActive
+      ? 'L-STICK/DPAD'
+      : `${keys.p1.Up}/${keys.p1.Left}/${keys.p1.Down}/${keys.p1.Right}`;
     const p1Entries = [
       { label: 'MOVE', key: p1Move },
       { label: 'USE', key: keys.p1.UseItem },
@@ -827,7 +830,10 @@ export class ShiftGameApp {
         makeGroup('DIMENSION', 'controls-hud-common', 'common', commonEntries)
       );
     } else {
-      const p2Move = `${keys.p2.Up}/${keys.p2.Left}/${keys.p2.Down}/${keys.p2.Right}`;
+      const p2PadActive = this.inputManager.isGamepadActiveForPlayer(2);
+      const p2Move = p2PadActive
+        ? 'L-STICK/DPAD'
+        : `${keys.p2.Up}/${keys.p2.Left}/${keys.p2.Down}/${keys.p2.Right}`;
       const p2Entries = [
         { label: 'MOVE', key: p2Move },
         { label: 'USE', key: keys.p2.UseItem },
@@ -974,6 +980,12 @@ export class ShiftGameApp {
     for (const ev of events) {
       if (ev.type === 'flashScreen' && ev.color) {
         this.renderer.triggerFlash(ev.color, ev.durationMs, ev.maxOpacity);
+      } else if (ev.type === 'playerDamaged') {
+        const pid = ev.playerId ?? this.localPlayerId;
+        this.inputManager.triggerVibration(pid, 180, 0.75, 0.5);
+      } else if (ev.type === 'dimensionShifted') {
+        this.inputManager.triggerVibration(1, 120, 0.45, 0.35);
+        this.inputManager.triggerVibration(2, 120, 0.45, 0.35);
       }
     }
   }
@@ -1065,7 +1077,7 @@ export class ShiftGameApp {
 
   private renderCurrentState(dtMs: number): void {
     const state = this.engine.getState();
-    const formattedKeys = this.inputManager.getFormattedKeyStrings();
+    const formattedKeys = this.inputManager.getEffectiveKeyStrings();
     const keyStrings = this.mobileControls.isEnabled()
       ? {
           p1: {
@@ -1117,6 +1129,7 @@ export class ShiftGameApp {
       const dtMs = timestamp - this.lastFrameTimestamp;
       this.lastFrameTimestamp = timestamp;
 
+      this.inputManager.pollGamepads();
       if (this.running) {
         this.stepFrame(dtMs);
       }

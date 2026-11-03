@@ -710,14 +710,30 @@ export type VirtualAction =
   | 'shift'
   | 'ping';
 
+export type GamepadMenuAction =
+  | 'up'
+  | 'down'
+  | 'left'
+  | 'right'
+  | 'confirm'
+  | 'cancel';
+
 export interface IInputManager {
   getPlayerInput(playerId: PlayerId): PlayerInput;
   getSettings(): ControlSettings;
+  getGamepadSettings?(): ControlSettings;
   updateBinding(
     group: 'p1' | 'p2' | 'common',
     action: string,
     code: string
   ): void;
+  updateGamepadBinding?(
+    group: 'p1' | 'p2' | 'common',
+    action: string,
+    code: string
+  ): void;
+  resetBindings?(): void;
+  resetGamepadBindings?(): void;
   formatKeyLabel(code: string): string;
   setVirtualDirection?(playerId: PlayerId, dir: Partial<DirectionalState>): void;
   triggerVirtualAction?(playerId: PlayerId, action: VirtualAction): void;
@@ -726,6 +742,25 @@ export interface IInputManager {
   cancelVirtualInventoryPress?(playerId: PlayerId): void;
   triggerPause?(): void;
   triggerMute?(): void;
+  pollGamepads?(): void;
+  getConnectedGamepadCount?(): number;
+  isGamepadActiveForPlayer?(playerId: PlayerId): boolean;
+  getEffectiveKeyStrings?(): ControlSettings;
+  getSingleGamepadPlayer?(): PlayerId;
+  setSingleGamepadPlayer?(playerId: PlayerId): void;
+  onGamepadMenuAction?(
+    handler: (action: GamepadMenuAction, gamepadIndex: number) => void
+  ): () => void;
+  onGamepadButtonDown?(
+    handler: (buttonCode: string, gamepadIndex: number) => void
+  ): () => void;
+  onGamepadStatusChange?(handler: (connectedCount: number) => void): () => void;
+  triggerVibration?(
+    playerId: PlayerId,
+    durationMs: number,
+    strongMagnitude?: number,
+    weakMagnitude?: number
+  ): void;
   destroy(): void;
 }
 

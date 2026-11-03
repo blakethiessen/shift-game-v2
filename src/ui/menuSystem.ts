@@ -2,6 +2,7 @@ import {
   CommonKeyBindings,
   ConnectionState,
   DevicePlatform,
+  GamepadMenuAction,
   IAudioManager,
   IInputManager,
   IPeerManager,
@@ -58,7 +59,38 @@ export interface MenuSystemOptions {
 interface RebindTarget {
   group: 'p1' | 'p2' | 'common';
   action: string;
+  device: 'keyboard' | 'gamepad';
 }
+
+const MENU_ACTION_GAMEPAD_BUTTONS = new Set([
+  'GamepadButton0',
+  'GamepadButton1',
+  'GamepadButton8',
+  'GamepadButton9',
+  'GamepadButton12',
+  'GamepadButton13',
+  'GamepadButton14',
+  'GamepadButton15',
+]);
+
+const GAMEPAD_CYCLE_BUTTONS = [
+  'GamepadButton0',
+  'GamepadButton1',
+  'GamepadButton2',
+  'GamepadButton3',
+  'GamepadButton4',
+  'GamepadButton5',
+  'GamepadButton6',
+  'GamepadButton7',
+  'GamepadButton8',
+  'GamepadButton9',
+  'GamepadButton10',
+  'GamepadButton11',
+  'GamepadButton12',
+  'GamepadButton13',
+  'GamepadButton14',
+  'GamepadButton15',
+];
 
 export class MenuSystem {
   private container: HTMLElement;
@@ -81,6 +113,10 @@ export class MenuSystem {
   private lobbyConfig: LobbyConfig = createDefaultLobbyConfig();
   private rebindingTarget: RebindTarget | null = null;
   private rebindingButtonEl: HTMLButtonElement | null = null;
+  private rebindingConsumedOnCurrentPress = false;
+  private gamepadFocusActive = false;
+  private unsubGamepadMenu?: () => void;
+  private unsubGamepadBtn?: () => void;
 
   private readonly boundKeyDown: (e: KeyboardEvent) => void;
 
@@ -130,6 +166,15 @@ export class MenuSystem {
       window.addEventListener('keydown', this.boundKeyDown);
     }
 
+    this.unsubGamepadBtn = this.inputManager.onGamepadButtonDown?.(
+      (buttonCode) => {
+        this.handleGamepadButtonDown(buttonCode);
+      }
+    );
+    this.unsubGamepadMenu = this.inputManager.onGamepadMenuAction?.((action) => {
+      this.handleGamepadMenuAction(action);
+    });
+
     const search =
       options.initialUrlSearch !== undefined
         ? options.initialUrlSearch
@@ -150,6 +195,9 @@ export class MenuSystem {
 
   public showScreen(screen: MenuScreen): void {
     this.rebindingTarget = null;
+    this.rebindingButtonEl = null;
+    this.rebindingConsumedOnCurrentPress = false;
+    this.gamepadFocusActive = false;
     this.currentScreen = screen;
     this.selectedIndex = 0;
 
@@ -265,6 +313,10 @@ export class MenuSystem {
         this.render();
         return;
       }
+      if (this.rebindingTarget.device === 'gamepad') {
+        // Ignore non-Escape keyboard presses while waiting for a controller button ([PRESS BTN])
+        return;
+      }
       if (e.code) {
         const { group, action } = this.rebindingTarget;
         this.inputManager.updateBinding(group, action, e.code);
@@ -377,6 +429,152 @@ export class MenuSystem {
     }
   }
 
+  private handleGamepadButtonDown(buttonCode: string): void {
+    if (this.currentScreen === 'hidden') return;
+    if (!this.rebindingTarget) return;
+
+    const { group, action, device } = this.rebindingTarget;
+    if (device === 'keyboard') {
+      // While waiting for a keyboard key ([PRESS KEY]), allow PAD B / PAD BACK to cancel,
+      // and ignore other gamepad buttons so keyboard bindings are not overwritten by controller buttons
+      if (buttonCode === 'GamepadButton1' || buttonCode === 'GamepadButton8') {
+        this.rebindingTarget = null;
+        this.rebindingButtonEl = null;
+        this.rebindingConsumedOnCurrentPress = true;
+        this.audioManager.playSound('menuCycle');
+        this.render();
+      }
+      return;
+    }
+
+    if (this.inputManager.updateGamepadBinding) {
+      this.inputManager.updateGamepadBinding(group, action, buttonCode);
+    } else {
+      this.inputManager.updateBinding(group, action, buttonCode);
+    }
+    if (this.rebindingButtonEl) {
+      this.rebindingButtonEl.classList.remove('is-rebinding');
+      const spans = this.rebindingButtonEl.querySelectorAll('span');
+      if (spans[1]) {
+        spans[1].textContent = this.inputManager.formatKeyLabel(buttonCode);
+      }
+    }
+    this.rebindingTarget = null;
+    this.rebindingButtonEl = null;
+    this.rebindingConsumedOnCurrentPress =
+      MENU_ACTION_GAMEPAD_BUTTONS.has(buttonCode);
+    this.audioManager.playSound('menuSelect');
+    this.render();
+  }
+
+  private getOptionsFocusableButtons(): HTMLButtonElement[] {
+    return Array.from(
+      this.rootEl.querySelectorAll<HTMLButtonElement>(
+        'button:not(:disabled)'
+      )
+    );
+  }
+
+  private handleGamepadMenuAction(action: GamepadMenuAction): void {
+    if (this.currentScreen === 'hidden') return;
+    if (this.rebindingTarget) return;
+    if (this.rebindingConsumedOnCurrentPress) {
+      this.rebindingConsumedOnCurrentPress = false;
+      return;
+    }
+
+    if (this.currentScreen === 'start') {
+      const itemsCount = 4;
+      if (action === 'up') {
+        this.selectedIndex = (this.selectedIndex - 1 + itemsCount) % itemsCount;
+        this.audioManager.playSound('menuCycle');
+        this.render();
+      } else if (action === 'down') {
+        this.selectedIndex = (this.selectedIndex + 1) % itemsCount;
+        this.audioManager.playSound('menuCycle');
+        this.render();
+      } else if (action === 'confirm') {
+        this.audioManager.playSound('menuSelect');
+        this.activateStartMenuItem(this.selectedIndex);
+      }
+      return;
+    }
+
+    if (this.currentScreen === 'tutorial') {
+      if (action === 'cancel') {
+        this.audioManager.playSound('menuSelect');
+        this.showScreen('start');
+      } else if (action === 'confirm') {
+        this.audioManager.playSound('menuSelect');
+        this.startLocalGameFromTutorial();
+      }
+      return;
+    }
+
+    if (this.currentScreen === 'credits') {
+      if (action === 'confirm' || action === 'cancel') {
+        this.audioManager.playSound('menuSelect');
+        this.showScreen('start');
+      }
+      return;
+    }
+
+    if (
+      this.currentScreen === 'options' ||
+      this.currentScreen === 'controls' ||
+      this.currentScreen === 'sound' ||
+      this.currentScreen === 'lobby'
+    ) {
+      if (action === 'cancel') {
+        if (this.currentScreen === 'lobby') {
+          this.peerManager?.disconnect();
+        }
+        this.audioManager.playSound('menuSelect');
+        this.showScreen('start');
+        return;
+      }
+      const buttons = this.getOptionsFocusableButtons();
+      if (buttons.length === 0) return;
+      if (
+        action === 'down' ||
+        action === 'right' ||
+        action === 'up' ||
+        action === 'left'
+      ) {
+        if (!this.gamepadFocusActive) {
+          this.gamepadFocusActive = true;
+          this.selectedIndex = 0;
+        } else {
+          const delta = action === 'down' || action === 'right' ? 1 : -1;
+          this.selectedIndex =
+            (this.selectedIndex + delta + buttons.length) % buttons.length;
+        }
+        this.audioManager.playSound('menuCycle');
+        buttons[this.selectedIndex]?.focus();
+      } else if (action === 'confirm') {
+        this.gamepadFocusActive = true;
+        const target =
+          (document.activeElement instanceof HTMLButtonElement &&
+          this.rootEl.contains(document.activeElement)
+            ? document.activeElement
+            : buttons[this.selectedIndex]) ?? buttons[0];
+        target?.click();
+      }
+      return;
+    }
+
+    if (this.currentScreen === 'gameOver' || this.currentScreen === 'victory') {
+      if (action === 'confirm' || action === 'cancel') {
+        this.audioManager.playSound('menuSelect');
+        if (this.callbacks.onReturnToTitle) {
+          this.callbacks.onReturnToTitle();
+        } else {
+          this.showScreen('start');
+        }
+      }
+    }
+  }
+
   private activateStartMenuItem(index: number): void {
     switch (index) {
       case 0:
@@ -440,6 +638,22 @@ export class MenuSystem {
         break;
       case 'hidden':
         break;
+    }
+
+    if (
+      this.gamepadFocusActive &&
+      (this.currentScreen === 'options' ||
+        this.currentScreen === 'controls' ||
+        this.currentScreen === 'sound' ||
+        this.currentScreen === 'lobby')
+    ) {
+      const buttons = this.getOptionsFocusableButtons();
+      if (buttons.length > 0) {
+        this.selectedIndex =
+          ((this.selectedIndex % buttons.length) + buttons.length) %
+          buttons.length;
+        buttons[this.selectedIndex]?.focus();
+      }
     }
   }
 
@@ -995,6 +1209,29 @@ export class MenuSystem {
     touchRow.appendChild(touchBtn);
     modeBox.appendChild(touchRow);
 
+    const gamepadRow = document.createElement('div');
+    gamepadRow.className = 'setting-row';
+    const gamepadLabel = document.createElement('span');
+    gamepadLabel.textContent = 'Controller (1 Pad):';
+    const gamepadBtn = document.createElement('button');
+    gamepadBtn.type = 'button';
+    gamepadBtn.className = 'action-btn';
+    gamepadBtn.setAttribute('data-testid', 'options-gamepad-target');
+    const currentSinglePadTarget =
+      this.inputManager.getSingleGamepadPlayer?.() ?? 1;
+    gamepadBtn.textContent =
+      currentSinglePadTarget === 2 ? 'P2 (Right)' : 'P1 (Left)';
+    gamepadBtn.addEventListener('click', () => {
+      this.audioManager.playSound('menuSelect');
+      const cur = this.inputManager.getSingleGamepadPlayer?.() ?? 1;
+      const next = cur === 1 ? 2 : 1;
+      this.inputManager.setSingleGamepadPlayer?.(next);
+      this.render();
+    });
+    gamepadRow.appendChild(gamepadLabel);
+    gamepadRow.appendChild(gamepadBtn);
+    modeBox.appendChild(gamepadRow);
+
     const scaleRow = document.createElement('div');
     scaleRow.className = 'setting-row';
     const scaleLabel = document.createElement('span');
@@ -1066,41 +1303,80 @@ export class MenuSystem {
 
     // Controls Rebinding Section
     const controlsSection = document.createElement('div');
+    const controlsHeaderRow = document.createElement('div');
+    controlsHeaderRow.className = 'controls-header-row';
     const controlsTitle = document.createElement('div');
     controlsTitle.className = 'menu-header-small';
-    controlsTitle.textContent = '- CONTROLS (Click any key to rebind, ESC to cancel) -';
-    controlsSection.appendChild(controlsTitle);
+    controlsTitle.textContent =
+      '- CONTROLS (Click Key or Pad button to rebind, ESC to cancel) -';
+    controlsHeaderRow.appendChild(controlsTitle);
+
+    const resetControlsBtn = document.createElement('button');
+    resetControlsBtn.type = 'button';
+    resetControlsBtn.className = 'action-btn action-btn-compact';
+    resetControlsBtn.setAttribute('data-testid', 'options-reset-controls');
+    resetControlsBtn.textContent = 'RESET DEFAULTS';
+    resetControlsBtn.addEventListener('click', () => {
+      this.audioManager.playSound('menuSelect');
+      this.rebindingTarget = null;
+      this.rebindingButtonEl = null;
+      this.inputManager.resetBindings?.();
+      this.render();
+    });
+    controlsHeaderRow.appendChild(resetControlsBtn);
+    controlsSection.appendChild(controlsHeaderRow);
 
     const cols = document.createElement('div');
     cols.className = 'controls-columns';
 
     const settings = this.inputManager.getSettings();
+    const gamepadSettings =
+      this.inputManager.getGamepadSettings?.() ?? settings;
 
     const createGroupColumn = (
       title: string,
       group: 'p1' | 'p2' | 'common',
-      bindings: PlayerKeyBindings | CommonKeyBindings
+      bindings: PlayerKeyBindings | CommonKeyBindings,
+      gpBindings: PlayerKeyBindings | CommonKeyBindings
     ) => {
       const col = document.createElement('div');
       col.className = 'controls-group';
       const h = document.createElement('div');
-      h.className = 'menu-header-small';
-      h.textContent = title;
+      h.className = 'menu-header-small controls-col-header';
+      const hTitle = document.createElement('span');
+      hTitle.textContent = title;
+      const hSub = document.createElement('span');
+      hSub.className = 'controls-col-sub';
+      hSub.textContent = 'KEY / PAD';
+      h.appendChild(hTitle);
+      h.appendChild(hSub);
       col.appendChild(h);
 
       for (const [action, code] of Object.entries(bindings)) {
-        const isRebinding =
+        const gpCode =
+          (gpBindings as unknown as Record<string, string>)[action] ?? '';
+        const isKbRebinding =
           this.rebindingTarget?.group === group &&
-          this.rebindingTarget?.action === action;
+          this.rebindingTarget?.action === action &&
+          this.rebindingTarget?.device === 'keyboard';
+        const isGpRebinding =
+          this.rebindingTarget?.group === group &&
+          this.rebindingTarget?.action === action &&
+          this.rebindingTarget?.device === 'gamepad';
+
+        const row = document.createElement('div');
+        row.className = 'binding-row';
+
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = `binding-btn${isRebinding ? ' is-rebinding' : ''}`;
+        btn.className = `binding-btn${isKbRebinding ? ' is-rebinding' : ''}`;
         btn.setAttribute('data-binding', `${group}.${action}`);
+        btn.title = `Keyboard ${action} (click to rebind)`;
 
         const actionSpan = document.createElement('span');
         actionSpan.textContent = `${action}:`;
         const keySpan = document.createElement('span');
-        keySpan.textContent = isRebinding
+        keySpan.textContent = isKbRebinding
           ? '[PRESS KEY]'
           : this.inputManager.formatKeyLabel(code as string);
 
@@ -1109,22 +1385,85 @@ export class MenuSystem {
 
         btn.addEventListener('click', () => {
           this.audioManager.playSound('menuSelect');
-          this.rebindingTarget = { group, action };
+          this.rebindingTarget = { group, action, device: 'keyboard' };
           this.rebindingButtonEl = btn;
           btn.classList.add('is-rebinding');
           keySpan.textContent = '[PRESS KEY]';
           this.render();
         });
 
-        col.appendChild(btn);
+        const gpBtn = document.createElement('button');
+        gpBtn.type = 'button';
+        gpBtn.className = `binding-btn binding-btn-gamepad${
+          isGpRebinding ? ' is-rebinding' : ''
+        }`;
+        gpBtn.setAttribute('data-gamepad-binding', `${group}.${action}`);
+        gpBtn.title = `Controller ${action} (click and press controller button, or click again to cycle)`;
+
+        const gpBadgeSpan = document.createElement('span');
+        gpBadgeSpan.className = 'gp-badge';
+        gpBadgeSpan.textContent = 'PAD';
+        const gpKeySpan = document.createElement('span');
+        gpKeySpan.textContent = isGpRebinding
+          ? '[PRESS BTN]'
+          : this.inputManager.formatKeyLabel(gpCode);
+
+        gpBtn.appendChild(gpBadgeSpan);
+        gpBtn.appendChild(gpKeySpan);
+
+        gpBtn.addEventListener('click', () => {
+          this.audioManager.playSound('menuSelect');
+          if (
+            this.rebindingTarget?.group === group &&
+            this.rebindingTarget?.action === action &&
+            this.rebindingTarget?.device === 'gamepad'
+          ) {
+            // Clicking again while in [PRESS BTN] mode cycles to the next controller button
+            const curIdx = GAMEPAD_CYCLE_BUTTONS.indexOf(gpCode);
+            const nextCode =
+              GAMEPAD_CYCLE_BUTTONS[
+                (curIdx + 1 + GAMEPAD_CYCLE_BUTTONS.length) %
+                  GAMEPAD_CYCLE_BUTTONS.length
+              ] ?? 'GamepadButton0';
+            if (this.inputManager.updateGamepadBinding) {
+              this.inputManager.updateGamepadBinding(group, action, nextCode);
+            } else {
+              this.inputManager.updateBinding(group, action, nextCode);
+            }
+            this.rebindingTarget = null;
+            this.rebindingButtonEl = null;
+            this.render();
+            return;
+          }
+          this.rebindingTarget = { group, action, device: 'gamepad' };
+          this.rebindingButtonEl = gpBtn;
+          gpBtn.classList.add('is-rebinding');
+          gpKeySpan.textContent = '[PRESS BTN]';
+          this.render();
+        });
+
+        row.appendChild(btn);
+        row.appendChild(gpBtn);
+        col.appendChild(row);
       }
 
       return col;
     };
 
-    cols.appendChild(createGroupColumn('Left Player', 'p1', settings.p1));
-    cols.appendChild(createGroupColumn('Right Player', 'p2', settings.p2));
-    cols.appendChild(createGroupColumn('Common', 'common', settings.common));
+    cols.appendChild(
+      createGroupColumn('Left Player', 'p1', settings.p1, gamepadSettings.p1)
+    );
+    cols.appendChild(
+      createGroupColumn('Right Player', 'p2', settings.p2, gamepadSettings.p2)
+    );
+    cols.appendChild(
+      createGroupColumn(
+        'Common',
+        'common',
+        settings.common,
+        gamepadSettings.common
+      )
+    );
 
     controlsSection.appendChild(cols);
     panel.appendChild(controlsSection);
@@ -1265,6 +1604,8 @@ export class MenuSystem {
   }
 
   public destroy(): void {
+    this.unsubGamepadMenu?.();
+    this.unsubGamepadBtn?.();
     if (typeof window !== 'undefined') {
       window.removeEventListener('keydown', this.boundKeyDown);
     }

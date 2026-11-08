@@ -269,7 +269,10 @@ export function toggleLever(
   }
 }
 
-function isPlayerTouchingDoor(player: PlayerState, door: DoorEntity): boolean {
+export function isPlayerTouchingDoor(
+  player: PlayerState,
+  door: DoorEntity
+): boolean {
   // Check if player's [3,3]..[22,22] box expanded by 2px overlaps the door's 25x25 tile
   return rectsOverlap(
     player.x + 1,

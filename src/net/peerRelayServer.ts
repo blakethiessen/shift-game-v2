@@ -78,7 +78,7 @@ export function attachPeerRelayServer(
 
   // Handle HTTP GET /shift-peerjs/peerjs/id requests (PeerJS retrieveId API)
   httpServer.on('request', (req: IncomingMessage, res: ServerResponse) => {
-    if (!req.url) {
+    if (!req.url || res.writableEnded || res.headersSent) {
       return;
     }
     const qIdx = req.url.indexOf('?');

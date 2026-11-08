@@ -274,10 +274,27 @@ export function getReachableRooms(startRoom: string = 'spawnRoom'): Set<string> 
   return visited;
 }
 
+const staticRoomTemplateCache = new Map<string, RoomState>();
 const staticRoomCellsCache = new Map<
   string,
   { neutral: GridCell[][]; dangerous: GridCell[][] }
 >();
+
+/**
+ * Returns a cached baseline RoomState template for `roomName`, or null if `roomName`
+ * is not in RAW_LEVELS. Used to reconstruct static room entity metadata after network compaction.
+ */
+export function getStaticRoomTemplate(roomName: string): RoomState | null {
+  if (!roomName || !RAW_LEVELS[roomName]) {
+    return null;
+  }
+  let cached = staticRoomTemplateCache.get(roomName);
+  if (!cached) {
+    cached = parseRoom(roomName);
+    staticRoomTemplateCache.set(roomName, cached);
+  }
+  return cached;
+}
 
 /**
  * Returns the cached static 20x26 GridCell matrices for `neutral` and `dangerous`
@@ -291,7 +308,7 @@ export function getStaticRoomCells(
   }
   let cached = staticRoomCellsCache.get(roomName);
   if (!cached) {
-    const parsed = parseRoom(roomName);
+    const parsed = getStaticRoomTemplate(roomName)!;
     cached = {
       neutral: parsed.worlds.neutral.cells,
       dangerous: parsed.worlds.dangerous.cells,

@@ -181,10 +181,9 @@ export class MenuSystem {
         : typeof window !== 'undefined'
         ? window.location.search
         : '';
-    const params = new URLSearchParams(search);
-    const roomFromUrl = params.get('room');
-    if (roomFromUrl && roomFromUrl.trim().length > 0) {
-      this.joinCodeInput = roomFromUrl.trim().toUpperCase();
+    const roomFromUrl = getRoomCodeFromUrl(search);
+    if (roomFromUrl) {
+      this.joinCodeInput = roomFromUrl;
       this.lobbyTab = 'join';
       this.lobbyConfig.mode = 'online';
       this.showScreen('lobby');
@@ -198,6 +197,7 @@ export class MenuSystem {
     this.rebindingButtonEl = null;
     this.rebindingConsumedOnCurrentPress = false;
     this.gamepadFocusActive = false;
+    this.copyFeedback = false;
     this.currentScreen = screen;
     this.selectedIndex = 0;
 
@@ -743,6 +743,7 @@ export class MenuSystem {
     hostTabBtn.textContent = 'HOST ROOM';
     hostTabBtn.addEventListener('click', () => {
       this.audioManager.playSound('menuSelect');
+      this.copyFeedback = false;
       if (this.lobbyTab !== 'host') {
         this.peerManager?.disconnect();
       }
@@ -770,6 +771,7 @@ export class MenuSystem {
     joinTabBtn.textContent = 'JOIN ROOM';
     joinTabBtn.addEventListener('click', () => {
       this.audioManager.playSound('menuSelect');
+      this.copyFeedback = false;
       if (this.lobbyTab !== 'join') {
         this.peerManager?.disconnect();
         this.roomCode = null;

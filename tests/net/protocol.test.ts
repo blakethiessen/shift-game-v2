@@ -11,6 +11,7 @@ import {
   buildInviteUrl,
   InputSequenceTracker,
   EventDeduplicator,
+  EntityInterpolator,
   isValidNetPacket,
   serializePacket,
   deserializePacket,
@@ -448,6 +449,209 @@ describe('Packet Serialization & Validation (protocol.ts)', () => {
     expect(deserializePacket({ type: 'unknown' })).toBeNull();
     expect(deserializePacket({ type: 'input', playerId: 99, clientTick: 1, input: {} })).toBeNull();
     expect(deserializePacket(null)).toBeNull();
+  });
+
+  it('compacts full GameEngine StatePackets to under 4KB (single frame) and losslessly restores all room entities and dynamic popup texts', () => {
+    const engine = new GameEngine(0x5f3759df);
+    // Test spawnRoom (has books, doors, statue, lamps, etc.)
+    const spawnState = engine.getState();
+    // Unlock a door and insert gems into the statue to verify dynamic popUpText restoration
+    const blackDoor = spawnState.room.worlds.neutral.doors.find(
+      (d) => d.kind === 'BlackDoor'
+    );
+    expect(blackDoor).toBeDefined();
+    if (blackDoor) {
+      blackDoor.unlocked = true;
+      blackDoor.playerAtDoor = true;
+      blackDoor.popUpText = 'The black door is unlocked!';
+    }
+
+    const pkt: StatePacket = {
+      type: 'state',
+      hostTick: spawnState.tick,
+      lastProcessedClientTick: 7,
+      state: structuredClone(spawnState),
+    };
+
+    const raw = serializePacket(pkt);
+    // Must be compact (< 4000 chars) so it fits in a single WebRTC / WS frame without chunking
+    expect(raw.length).toBeLessThan(4000);
+
+    const restored = deserializePacket(raw) as StatePacket | null;
+    expect(restored).not.toBeNull();
+    expect(restored!.state).toEqual(pkt.state);
+
+    // Test choiceRoom (has GemStatue, books, doors)
+    engine.loadRoom('choiceRoom');
+    const choiceState = engine.getState();
+    const statue = choiceState.room.worlds.neutral.statues[0];
+    expect(statue).toBeDefined();
+    if (statue) {
+      statue.hasRedGem = true;
+      statue.hasBlueGem = true;
+      statue.popUpText =
+        'A tall, majestic statue. It has 3 gem-shaped slots in its base. A red gem is inserted. A blue gem is inserted.';
+    }
+    const pktChoice: StatePacket = {
+      type: 'state',
+      hostTick: choiceState.tick,
+      lastProcessedClientTick: 8,
+      state: structuredClone(choiceState),
+    };
+    const rawChoice = serializePacket(pktChoice);
+    expect(rawChoice.length).toBeLessThan(4000);
+    const restoredChoice = deserializePacket(rawChoice) as StatePacket | null;
+    expect(restoredChoice).not.toBeNull();
+    expect(restoredChoice!.state).toEqual(pktChoice.state);
+
+    // Also test a room with evilLamps, chests, levers, pressurePlates, fires ('lampMonsterIntro' / 'chestIntro')
+    engine.loadRoom('lampMonsterIntro');
+    const lampRoomState = engine.getState();
+    if (lampRoomState.room.worlds.dangerous.evilLamps[0]) {
+      lampRoomState.room.worlds.dangerous.evilLamps[0].stage = 'opening';
+      lampRoomState.room.worlds.dangerous.evilLamps[0].timerMs = 320;
+      lampRoomState.room.worlds.dangerous.evilLamps[0].isOn = true;
+    }
+    const pkt2: StatePacket = {
+      type: 'state',
+      hostTick: lampRoomState.tick,
+      lastProcessedClientTick: 8,
+      state: structuredClone(lampRoomState),
+    };
+    const raw2 = serializePacket(pkt2);
+    expect(raw2.length).toBeLessThan(4000);
+    const restored2 = deserializePacket(raw2) as StatePacket | null;
+    expect(restored2).not.toBeNull();
+    expect(restored2!.state).toEqual(pkt2.state);
+
+    engine.loadRoom('chestIntro');
+    const chestRoomState = engine.getState();
+    if (chestRoomState.room.worlds.neutral.chests[0]) {
+      chestRoomState.room.worlds.neutral.chests[0].opened = true;
+      chestRoomState.room.worlds.neutral.chests[0].used = true;
+    }
+    if (chestRoomState.room.worlds.neutral.pressurePlates[0]) {
+      chestRoomState.room.worlds.neutral.pressurePlates[0].touched = true;
+    }
+    if (chestRoomState.room.worlds.neutral.levers[0]) {
+      chestRoomState.room.worlds.neutral.levers[0].activated = true;
+    }
+    if (chestRoomState.room.worlds.neutral.fires[0]) {
+      chestRoomState.room.worlds.neutral.fires[0].isOn = false;
+      chestRoomState.room.worlds.neutral.fires[0].damageTimerMs = 450;
+    }
+    const pkt3: StatePacket = {
+      type: 'state',
+      hostTick: chestRoomState.tick,
+      lastProcessedClientTick: 9,
+      state: structuredClone(chestRoomState),
+    };
+    const raw3 = serializePacket(pkt3);
+    expect(raw3.length).toBeLessThan(4000);
+    const restored3 = deserializePacket(raw3) as StatePacket | null;
+    expect(restored3).not.toBeNull();
+    expect(restored3!.state).toEqual(pkt3.state);
+  });
+
+  it('validates and round-trips InputPacket with clientState (and rejects malformed clientState)', () => {
+    const validInputWithClientState: InputPacket = {
+      type: 'input',
+      playerId: 2,
+      clientTick: 15,
+      input: {
+        ...createDefaultPlayerInput(),
+        right: true,
+      },
+      clientState: {
+        roomName: 'spawnRoom',
+        roomsEntered: 1,
+        evilOnLeft: false,
+        ackHostTick: 12,
+        x: 245.5,
+        y: 325,
+        velocity: { x: 2, y: 0 },
+        direction: 5,
+        flashLightDir: 5,
+        isMoving: true,
+        boxColliding: false,
+      },
+    };
+
+    expect(isValidNetPacket(validInputWithClientState)).toBe(true);
+    const raw = serializePacket(validInputWithClientState);
+    const parsed = deserializePacket(raw);
+    expect(parsed).toEqual(validInputWithClientState);
+
+    const invalidClientState = {
+      ...validInputWithClientState,
+      clientState: {
+        ...validInputWithClientState.clientState,
+        x: 'not-a-number',
+      },
+    };
+    expect(isValidNetPacket(invalidClientState)).toBe(false);
+    expect(deserializePacket(JSON.stringify(invalidClientState))).toBeNull();
+  });
+
+  it('smoothly interpolates remote entities across render frames without mutating GameState after restore()', () => {
+    const interpolator = new EntityInterpolator();
+    const engine = new GameEngine(0x5f3759df);
+    const state = engine.getState();
+
+    // Add a Blobby to dangerous world
+    state.room.worlds.dangerous.blobbies.push({
+      id: 'blobby_1',
+      world: 'dangerous',
+      x: 100,
+      y: 100,
+      velocity: { x: 1, y: 0 },
+      direction: 5,
+      state: 'Seeking',
+      currentSpeed: 1,
+      wanderTimerTicks: 0,
+      wanderIntervalTicks: 40,
+      eatingTimerTicks: 0,
+      path: [],
+      nextStepIdx: 0,
+      nextStep: null,
+      oldTargetCoord: { x: 4, y: 4 },
+    });
+
+    // Initial target snapshot on Client (localPlayerId = 2, so Player 1 is remote)
+    state.players[0].x = 200;
+    state.players[0].y = 300;
+    interpolator.recordSnapshot(state, 2);
+
+    // Next snapshot moves remote Player 1 to 220 and Blobby to 116 (within 50px teleport threshold)
+    state.players[0].x = 220;
+    state.players[0].y = 300;
+    state.room.worlds.dangerous.blobbies[0].x = 116;
+    interpolator.recordSnapshot(state, 2);
+
+    // Apply for render (16.67ms frame): remote entities should be between old (200, 100) and target (220, 116),
+    // while local Player 2 is untouched
+    const p2OriginalX = state.players[1].x;
+    const restore = interpolator.applyToStateForRender(state, 2, 16.67);
+    const renderedP1X = state.players[0].x;
+    const renderedBlobbyX = state.room.worlds.dangerous.blobbies[0].x;
+
+    expect(renderedP1X).toBeGreaterThan(200);
+    expect(renderedP1X).toBeLessThan(220);
+    expect(renderedBlobbyX).toBeGreaterThan(100);
+    expect(renderedBlobbyX).toBeLessThan(116);
+    expect(state.players[1].x).toBe(p2OriginalX);
+
+    // Calling restore() MUST restore exact simulation coordinates on state!
+    restore();
+    expect(state.players[0].x).toBe(220);
+    expect(state.room.worlds.dangerous.blobbies[0].x).toBe(116);
+
+    // Teleport > 50px snaps immediately without lagging behind
+    state.players[0].x = 400;
+    interpolator.recordSnapshot(state, 2);
+    const restoreAfterTeleport = interpolator.applyToStateForRender(state, 2, 16.67);
+    expect(state.players[0].x).toBe(400);
+    restoreAfterTeleport();
   });
 });
 
@@ -993,6 +1197,585 @@ describe('PeerManager P2P Handshake, Sync, Ping/Pong RTT & Disconnect (peerManag
     clientWebRtcErrorCb?.(webrtcErr);
     clientWebRtcCloseCb?.();
     expect(client.getConnectionState()).toBe('connected');
+    expect(host.getConnectionState()).toBe('connected');
+
+    host.disconnect();
+    client.disconnect();
+  });
+
+  it('automatically falls back to cloud PeerServer (useCloudServer: true) without flashing error when same-origin signaling fails before open with "Lost connection to server."', async () => {
+    const bus = new InMemoryPeerBus();
+    const cloudFactory = bus.createPeerFactory();
+    const factoryCalls: Array<{ id?: string; useCloudServer?: boolean }> = [];
+
+    const fallbackFactory = (
+      id?: string,
+      options?: { useCloudServer?: boolean }
+    ): IPeerLike => {
+      factoryCalls.push({ id, useCloudServer: options?.useCloudServer });
+      if (!options?.useCloudServer) {
+        // Simulate static host where /shift-peerjs/peerjs WebSocket immediately closes before open,
+        // causing PeerJS to emit error(type='network', 'Lost connection to server.') and disconnect.
+        let errorHandler: ((err: Error & { type?: string }) => void) | null = null;
+        let disconnectedHandler: ((currentId: string) => void) | null = null;
+        const failedPeer: IPeerLike = {
+          id: id ?? 'failed-same-origin-peer',
+          destroyed: false,
+          disconnected: false,
+          connect: vi.fn(),
+          destroy: vi.fn(function (this: { destroyed: boolean }) {
+            this.destroyed = true;
+          }),
+          disconnect: vi.fn(function (this: { disconnected: boolean }) {
+            this.disconnected = true;
+          }),
+          on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+            if (event === 'error') {
+              errorHandler = cb as (err: Error & { type?: string }) => void;
+            } else if (event === 'disconnected') {
+              disconnectedHandler = cb as (currentId: string) => void;
+            }
+            return failedPeer;
+          }),
+        };
+        queueMicrotask(() => {
+          if (failedPeer.destroyed) return;
+          const err = new Error('Lost connection to server.') as Error & {
+            type?: string;
+          };
+          err.type = 'network';
+          errorHandler?.(err);
+          (failedPeer as { disconnected: boolean }).disconnected = true;
+          disconnectedHandler?.(failedPeer.id);
+        });
+        return failedPeer;
+      }
+      return cloudFactory(id, options);
+    };
+
+    const host = new PeerManager(fallbackFactory);
+    const client = new PeerManager(fallbackFactory);
+
+    const hostStates: Array<{ state: ConnectionState; error?: string }> = [];
+    const clientStates: Array<{ state: ConnectionState; error?: string }> = [];
+    host.onStateChange((state, error) => hostStates.push({ state, error }));
+    client.onStateChange((state, error) => clientStates.push({ state, error }));
+
+    const code = await host.hostRoom('CLD01');
+    expect(code).toBe('CLD01');
+    expect(host.getConnectionState()).toBe('hosting');
+    // Must never emit 'error' state during transparent fallback
+    expect(hostStates.some((s) => s.state === 'error')).toBe(false);
+
+    await client.joinRoom('CLD01');
+    expect(host.getConnectionState()).toBe('connected');
+    expect(client.getConnectionState()).toBe('connected');
+    expect(clientStates.some((s) => s.state === 'error')).toBe(false);
+
+    // Verify both tried same-origin first (useCloudServer: false/undefined) and then retried with useCloudServer: true
+    expect(factoryCalls).toEqual([
+      { id: 'shift-game-room-cld01', useCloudServer: false },
+      { id: 'shift-game-room-cld01', useCloudServer: true },
+      { id: undefined, useCloudServer: false },
+      { id: undefined, useCloudServer: true },
+    ]);
+
+    // Subsequent hostRoom call on same PeerManager should go straight to cloud server
+    host.disconnect();
+    client.disconnect();
+    factoryCalls.length = 0;
+
+    await host.hostRoom('CLD02');
+    expect(factoryCalls).toEqual([
+      { id: 'shift-game-room-cld02', useCloudServer: true },
+    ]);
+
+    host.disconnect();
+  });
+
+  it('does not register duplicate data listeners when upgrading from WebSocket relay to direct WebRTC DataConnection', async () => {
+    type SocketListener = (data: unknown) => void;
+    const sockets = new Map<string, Set<SocketListener>>();
+
+    const createSocket = (myPeerId: string) => {
+      const listeners = new Set<SocketListener>();
+      sockets.set(myPeerId, listeners);
+      return {
+        on: vi.fn((event: string, cb: SocketListener) => {
+          if (event === 'message') listeners.add(cb);
+        }),
+        send: vi.fn((raw: unknown) => {
+          const msg = raw as { type?: string; dst?: string; payload?: unknown };
+          if (!msg?.dst) return;
+          const target = sockets.get(msg.dst);
+          if (!target) return;
+          queueMicrotask(() => {
+            for (const fn of target) {
+              fn({
+                type: msg.type,
+                src: myPeerId,
+                dst: msg.dst,
+                payload: msg.payload,
+              });
+            }
+          });
+        }),
+      };
+    };
+
+    let hostWebRtcConn: InMemoryDataConnectionLike | null = null;
+    let clientWebRtcConn: InMemoryDataConnectionLike | null = null;
+
+    interface InMemoryDataConnectionLike extends IDataConnectionLike {
+      open: boolean;
+      triggerOpen(): void;
+      triggerData(data: unknown): void;
+    }
+
+    const makeDelayedConn = (peerId: string): InMemoryDataConnectionLike => {
+      const openListeners = new Set<() => void>();
+      const dataListeners = new Set<(d: unknown) => void>();
+      const conn: InMemoryDataConnectionLike = {
+        peer: peerId,
+        open: false,
+        send: vi.fn(),
+        close: vi.fn(),
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === 'open') openListeners.add(cb as () => void);
+          if (event === 'data') dataListeners.add(cb as (d: unknown) => void);
+          return conn;
+        }),
+        triggerOpen() {
+          this.open = true;
+          for (const fn of openListeners) fn();
+        },
+        triggerData(data: unknown) {
+          for (const fn of dataListeners) fn(data);
+        },
+      };
+      return conn;
+    };
+
+    let hostConnectionCb: ((conn: IDataConnectionLike) => void) | null = null;
+
+    const upgradeFactory = (requestedId?: string): IPeerLike => {
+      const peerId = requestedId ?? 'client-upgrade-1';
+      let openCb: ((id: string) => void) | null = null;
+      const socket = createSocket(peerId);
+      const fakePeer: IPeerLike = {
+        id: peerId,
+        destroyed: false,
+        disconnected: false,
+        socket,
+        connect: vi.fn((targetId: string) => {
+          clientWebRtcConn = makeDelayedConn(targetId);
+          hostWebRtcConn = makeDelayedConn(peerId);
+          queueMicrotask(() => {
+            hostConnectionCb?.(hostWebRtcConn!);
+          });
+          return clientWebRtcConn;
+        }),
+        destroy: vi.fn(),
+        disconnect: vi.fn(),
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === 'open') openCb = cb as (id: string) => void;
+          if (event === 'connection') {
+            hostConnectionCb = cb as (conn: IDataConnectionLike) => void;
+          }
+          return fakePeer;
+        }),
+      };
+      queueMicrotask(() => openCb?.(peerId));
+      return fakePeer;
+    };
+
+    const host = new PeerManager({
+      peerFactory: upgradeFactory,
+      relayFallbackDelayMs: 100,
+    });
+    const client = new PeerManager({
+      peerFactory: upgradeFactory,
+      relayFallbackDelayMs: 100,
+    });
+
+    await host.hostRoom('UPG01');
+    const joinP = client.joinRoom('UPG01');
+    await Promise.resolve();
+    vi.advanceTimersByTime(150);
+    await Promise.resolve();
+    await Promise.resolve();
+    await joinP;
+
+    expect(host.isUsingRelay()).toBe(true);
+    expect(client.isUsingRelay()).toBe(true);
+
+    // Now direct WebRTC finishes ICE negotiation and opens on both sides
+    hostWebRtcConn!.triggerOpen();
+    clientWebRtcConn!.triggerOpen();
+
+    expect(host.isUsingRelay()).toBe(false);
+    expect(client.isUsingRelay()).toBe(false);
+
+    const hostReceived: NetPacket[] = [];
+    host.onPacket((p) => hostReceived.push(p));
+
+    hostWebRtcConn!.triggerData(
+      serializePacket({
+        type: 'input',
+        playerId: 2,
+        clientTick: 1,
+        input: createDefaultPlayerInput(),
+      })
+    );
+
+    expect(hostReceived).toHaveLength(1);
+
+    host.disconnect();
+    client.disconnect();
+  });
+
+  it('keeps every WebSocket relay frame under 12KB (avoiding 0.peerjs.com CloseCode 1009 MessageTooBig) and paces cloud relay StatePackets while preserving GameEvents', async () => {
+    type SocketListener = (data: unknown) => void;
+    const sockets = new Map<string, Set<SocketListener>>();
+    const wireFrameByteLengths: number[] = [];
+
+    const createSocket = (myPeerId: string) => {
+      const listeners = new Set<SocketListener>();
+      sockets.set(myPeerId, listeners);
+      return {
+        on: vi.fn((event: string, cb: SocketListener) => {
+          if (event === 'message') listeners.add(cb);
+        }),
+        send: vi.fn((raw: unknown) => {
+          const serializedWire = JSON.stringify(raw);
+          wireFrameByteLengths.push(serializedWire.length);
+          const msg = JSON.parse(serializedWire) as {
+            type?: string;
+            dst?: string;
+            payload?: unknown;
+          };
+          if (!msg?.dst) return;
+          const target = sockets.get(msg.dst);
+          if (!target) return;
+          queueMicrotask(() => {
+            for (const fn of target) {
+              fn({
+                type: msg.type,
+                src: myPeerId,
+                dst: msg.dst,
+                payload: msg.payload,
+              });
+            }
+          });
+        }),
+      };
+    };
+
+    const cloudRelayFactory = (requestedId?: string): IPeerLike => {
+      const peerId = requestedId ?? 'cloud-client-1';
+      let openCb: ((id: string) => void) | null = null;
+      const socket = createSocket(peerId);
+      const stalledConn: IDataConnectionLike = {
+        peer: 'shift-game-room-6jt44',
+        open: false,
+        send: vi.fn(),
+        close: vi.fn(),
+        on: vi.fn(() => stalledConn),
+      };
+      const fakePeer: IPeerLike = {
+        id: peerId,
+        destroyed: false,
+        disconnected: false,
+        isCloudBroker: true,
+        socket,
+        connect: vi.fn(() => stalledConn),
+        destroy: vi.fn(),
+        disconnect: vi.fn(),
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === 'open') openCb = cb as (id: string) => void;
+          return fakePeer;
+        }),
+      };
+      queueMicrotask(() => openCb?.(peerId));
+      return fakePeer;
+    };
+
+    const host = new PeerManager({
+      peerFactory: cloudRelayFactory,
+      relayFallbackDelayMs: 50,
+      pingIntervalMs: 60000,
+    });
+    const client = new PeerManager({
+      peerFactory: cloudRelayFactory,
+      relayFallbackDelayMs: 50,
+      pingIntervalMs: 60000,
+    });
+
+    await host.hostRoom('6JT44');
+    const joinP = client.joinRoom('6JT44');
+    await Promise.resolve();
+    vi.advanceTimersByTime(60);
+    await Promise.resolve();
+    await Promise.resolve();
+    await joinP;
+
+    const clientReceived: NetPacket[] = [];
+    client.onPacket((p) => clientReceived.push(p));
+
+    wireFrameByteLengths.length = 0;
+
+    // 1. Host sends startGame lobbySync followed immediately (within same 16ms frame) by
+    // tick 1 StatePacket (with an event) and tick 2 StatePacket (routine).
+    host.sendPacket({
+      type: 'lobbySync',
+      lobbyConfig: createDefaultLobbyConfig(),
+      hostReady: true,
+      clientReady: true,
+      startGame: true,
+    });
+
+    const engine = new GameEngine();
+    const state1 = structuredClone(engine.getState());
+    state1.tick = 1;
+    state1.events = [
+      { eventId: 1, type: 'playSound', sound: 'doorClosing' },
+    ];
+    host.sendPacket({
+      type: 'state',
+      hostTick: 1,
+      lastProcessedClientTick: 0,
+      state: state1,
+    });
+
+    const state2 = structuredClone(engine.getState());
+    state2.tick = 2;
+    state2.events = [];
+    host.sendPacket({
+      type: 'state',
+      hostTick: 2,
+      lastProcessedClientTick: 0,
+      state: state2,
+    });
+
+    // Advance past cloud relay interval so coalesced state flushes
+    vi.advanceTimersByTime(150);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Every single WebSocket frame sent on the wire must be strictly < 12,000 bytes
+    // (well below 0.peerjs.com's ~19KB CloseCode 1009 limit)
+    expect(wireFrameByteLengths.length).toBeGreaterThan(0);
+    for (const byteLen of wireFrameByteLengths) {
+      expect(byteLen).toBeLessThan(12000);
+    }
+
+    // Client must have received the latest state (hostTick 2) WITH the preserved event from tick 1!
+    const statePackets = clientReceived.filter(
+      (p): p is StatePacket => p.type === 'state'
+    );
+    expect(statePackets.length).toBeGreaterThan(0);
+    const latestState = statePackets[statePackets.length - 1];
+    expect(latestState.hostTick).toBe(2);
+    expect(latestState.state.events.some((e) => e.eventId === 1)).toBe(true);
+
+    // 2. Simulate 20 transient 'peer-unavailable' (EXPIRE) errors on Client while Host signaling reconnects:
+    // Client must remain 'connected' and NOT abort to lobby with "Could not connect to peer shift-game-room-6jt44"
+    const clientPeer = (client as unknown as { peer: IPeerLike }).peer;
+    const peerUnavailableListeners = (
+      clientPeer.on as ReturnType<typeof vi.fn>
+    ).mock.calls
+      .filter((c) => c[0] === 'error')
+      .map((c) => c[1] as (err: Error & { type?: string }) => void);
+
+    for (let i = 0; i < 20; i++) {
+      const expireErr = new Error(
+        'Could not connect to peer shift-game-room-6jt44'
+      ) as Error & { type?: string };
+      expireErr.type = 'peer-unavailable';
+      for (const fn of peerUnavailableListeners) {
+        fn(expireErr);
+      }
+    }
+
+    expect(client.getConnectionState()).toBe('connected');
+
+    host.disconnect();
+    client.disconnect();
+  });
+
+  it('survives Client peerInstance.reconnect() re-emitting "open", Host peer-unavailable blips, and Host early WebRTC failure before WS relay SYN arrives', async () => {
+    type SocketListener = (data: unknown) => void;
+    const sockets = new Map<string, Set<SocketListener>>();
+
+    const createSocket = (myPeerId: string) => {
+      const listeners = new Set<SocketListener>();
+      sockets.set(myPeerId, listeners);
+      return {
+        on: vi.fn((event: string, cb: SocketListener) => {
+          if (event === 'message') listeners.add(cb);
+        }),
+        send: vi.fn((raw: unknown) => {
+          const msg = raw as { type?: string; dst?: string; payload?: unknown };
+          if (!msg?.dst) return;
+          const target = sockets.get(msg.dst);
+          if (!target) return;
+          queueMicrotask(() => {
+            for (const fn of target) {
+              fn({
+                type: msg.type,
+                src: myPeerId,
+                dst: msg.dst,
+                payload: msg.payload,
+              });
+            }
+          });
+        }),
+      };
+    };
+
+    let hostConnectionCb = null as ((conn: IDataConnectionLike) => void) | null;
+    let hostIncomingWebRtcErrorCb = null as ((err: Error) => void) | null;
+    let hostIncomingWebRtcCloseCb = null as (() => void) | null;
+    let clientOpenCb = null as ((id: string) => void) | null;
+    const hostErrorCbs: Array<(err: Error & { type?: string }) => void> = [];
+
+    const resilientFactory = (requestedId?: string): IPeerLike => {
+      const isHost = Boolean(requestedId);
+      const peerId = requestedId ?? 'client-reconnect-peer';
+      let openCb: ((id: string) => void) | null = null;
+      const socket = createSocket(peerId);
+
+      const makeStalledConn = (targetId: string): IDataConnectionLike => {
+        const conn: IDataConnectionLike = {
+          peer: targetId,
+          open: false,
+          send: vi.fn(),
+          close: vi.fn(),
+          on: vi.fn((ev: string, cb: (...args: any[]) => void) => {
+            if (!isHost) {
+              return conn;
+            }
+            if (ev === 'error') hostIncomingWebRtcErrorCb = cb as (err: Error) => void;
+            if (ev === 'close') hostIncomingWebRtcCloseCb = cb as () => void;
+            return conn;
+          }),
+        };
+        return conn;
+      };
+
+      const fakePeer: IPeerLike = {
+        id: peerId,
+        destroyed: false,
+        disconnected: false,
+        socket,
+        connect: vi.fn((targetId: string) => {
+          // Simulate PeerJS immediately delivering incoming unopened DataConnection to Host on OFFER
+          const hostSideConn: IDataConnectionLike = {
+            peer: peerId,
+            open: false,
+            send: vi.fn(),
+            close: vi.fn(),
+            on: vi.fn((ev: string, cb: (...args: any[]) => void) => {
+              if (ev === 'error') hostIncomingWebRtcErrorCb = cb as (err: Error) => void;
+              if (ev === 'close') hostIncomingWebRtcCloseCb = cb as () => void;
+              return hostSideConn;
+            }),
+          };
+          queueMicrotask(() => {
+            hostConnectionCb?.(hostSideConn);
+          });
+          return makeStalledConn(targetId);
+        }),
+        destroy: vi.fn(),
+        disconnect: vi.fn(function (this: { disconnected: boolean }) {
+          this.disconnected = true;
+        }),
+        reconnect: vi.fn(function (this: { disconnected: boolean }) {
+          this.disconnected = false;
+          // PeerJS re-emits 'open' when reconnect() receives OPEN from signaling server!
+          openCb?.(peerId);
+        }),
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === 'open') {
+            openCb = cb as (id: string) => void;
+            if (!isHost) clientOpenCb = openCb;
+          }
+          if (event === 'connection' && isHost) {
+            hostConnectionCb = cb as (conn: IDataConnectionLike) => void;
+          }
+          if (event === 'error' && isHost) {
+            hostErrorCbs.push(cb as (err: Error & { type?: string }) => void);
+          }
+          return fakePeer;
+        }),
+      };
+
+      queueMicrotask(() => openCb?.(peerId));
+      return fakePeer;
+    };
+
+    const host = new PeerManager({
+      peerFactory: resilientFactory,
+      relayFallbackDelayMs: 500,
+      pingIntervalMs: 60000,
+    });
+    const client = new PeerManager({
+      peerFactory: resilientFactory,
+      relayFallbackDelayMs: 500,
+      pingIntervalMs: 60000,
+    });
+
+    await host.hostRoom('RES01');
+    const joinP = client.joinRoom('RES01');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 1. Before relayFallbackDelayMs (500ms) elapses, the Host's incoming unopened WebRTC DataConnection
+    // emits 'error' and 'close'. Host MUST remain in 'hosting' state and NOT transition to 'error' or 'disconnected'!
+    expect(hostIncomingWebRtcErrorCb).toBeTruthy();
+    hostIncomingWebRtcErrorCb?.(new Error('ICE negotiation failed early'));
+    hostIncomingWebRtcCloseCb?.();
+    expect(host.getConnectionState()).toBe('hosting');
+
+    // Now advance past relayFallbackDelayMs (500ms) so WS relay SYN/ACK completes
+    vi.advanceTimersByTime(600);
+    await Promise.resolve();
+    await Promise.resolve();
+    await joinP;
+
+    expect(host.getConnectionState()).toBe('connected');
+    expect(client.getConnectionState()).toBe('connected');
+    expect(host.isUsingRelay()).toBe(true);
+    expect(client.isUsingRelay()).toBe(true);
+
+    // 2. Simulate Client signaling blip + reconnect(), which re-emits 'open' on Client peerInstance:
+    // Client MUST keep its active PeerSocketRelayConnection and NOT overwrite it with an unopened WebRTC conn!
+    expect(clientOpenCb).toBeTruthy();
+    clientOpenCb!('client-reconnect-peer');
+    expect(client.isUsingRelay()).toBe(true);
+
+    const hostReceived: NetPacket[] = [];
+    host.onPacket((p) => hostReceived.push(p));
+    client.sendPacket({
+      type: 'input',
+      playerId: 2,
+      clientTick: 9,
+      input: createDefaultPlayerInput(),
+    });
+    await Promise.resolve();
+    expect(hostReceived.some((p) => p.type === 'input' && p.clientTick === 9)).toBe(true);
+
+    // 3. Simulate Host receiving 15 transient 'peer-unavailable' (EXPIRE) errors while Client signaling reconnects:
+    // Host MUST remain 'connected' and NOT abort to 'error'!
+    for (let i = 0; i < 15; i++) {
+      const expireErr = new Error(
+        'Could not connect to peer client-reconnect-peer'
+      ) as Error & { type?: string };
+      expireErr.type = 'peer-unavailable';
+      for (const fn of hostErrorCbs) {
+        fn(expireErr);
+      }
+    }
     expect(host.getConnectionState()).toBe('connected');
 
     host.disconnect();

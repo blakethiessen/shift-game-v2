@@ -604,11 +604,26 @@ export interface ControlSettings {
   common: CommonKeyBindings;
 }
 
+export interface ClientPlayerSyncState {
+  roomName: string;
+  roomsEntered: number;
+  evilOnLeft: boolean;
+  ackHostTick: number;
+  x: number;
+  y: number;
+  velocity: Vector2D;
+  direction: Direction;
+  flashLightDir: Direction;
+  isMoving: boolean;
+  boxColliding: boolean;
+}
+
 export interface InputPacket {
   type: 'input';
   playerId: PlayerId;
   clientTick: number;
   input: PlayerInput;
+  clientState?: ClientPlayerSyncState;
 }
 
 export interface StatePacket {
@@ -643,6 +658,8 @@ export type NetPacket =
 
 export interface IGameEngine {
   tick(dtMs: number, p1Input: PlayerInput, p2Input: PlayerInput): GameState;
+  tickClientLocal?(dtMs: number, clientInput: PlayerInput): GameState;
+  applyClientPlayerSync?(sync: ClientPlayerSyncState): void;
   getState(): GameState;
   setState(snapshot: GameState): void;
   setLobbyConfig(config: Partial<LobbyConfig>): void;

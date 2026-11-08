@@ -4,10 +4,19 @@
 
 import { AudioManager } from './audio/audioManager';
 import { GameEngine } from './core/gameEngine';
+import {
+  doesBoxCollide,
+  doesPlayerCollideWithWalls,
+  findOverlappingBox,
+} from './core/playerLogic';
 import { InputManager } from './input/inputManager';
 import { MobileControls } from './input/mobileControls';
 import { PeerManager } from './net/peerManager';
-import { EventDeduplicator, InputSequenceTracker } from './net/protocol';
+import {
+  EntityInterpolator,
+  EventDeduplicator,
+  InputSequenceTracker,
+} from './net/protocol';
 import {
   CAMERA_ZOOM_PRESETS,
   CAMERA_ZOOM_STEP,
@@ -38,6 +47,9 @@ import {
   SIMULATION_TICK_MS,
   WindowScaleMode,
   createDefaultLobbyConfig,
+  getWorldForSide,
+  localPixelToTile,
+  tileManhattanDistance,
 } from './shared/types';
 import { MenuSystem } from './ui/menuSystem';
 
@@ -72,6 +84,7 @@ export class ShiftGameApp {
 
   private readonly clientInputTracker = new InputSequenceTracker();
   private readonly eventDeduplicator = new EventDeduplicator();
+  private readonly entityInterpolator = new EntityInterpolator();
 
   private mode: PlayMode = 'local';
   private isOnlineHost = true;
@@ -84,6 +97,8 @@ export class ShiftGameApp {
   private running = false;
   private clientTickCounter = 0;
   private lastProcessedClientTick = 0;
+  private lastReceivedHostTick = 0;
+  private clientHasLocallySimulatedInRoom = false;
 
   private zoomHudEl: HTMLElement | null = null;
   private zoomHudSliderEl: HTMLInputElement | null = null;
@@ -880,6 +895,9 @@ export class ShiftGameApp {
 
     this.eventDeduplicator.reset();
     this.clientInputTracker.reset();
+    this.entityInterpolator.reset();
+    this.lastReceivedHostTick = 0;
+    this.clientHasLocallySimulatedInRoom = false;
     this.engine.resetGame();
     this.engine.setLobbyConfig(this.lobbyConfig);
 
@@ -911,15 +929,14 @@ export class ShiftGameApp {
 
     this.eventDeduplicator.reset();
     this.clientInputTracker.reset();
+    this.entityInterpolator.reset();
     this.clientTickCounter = 0;
     this.lastProcessedClientTick = 0;
+    this.lastReceivedHostTick = 0;
+    this.clientHasLocallySimulatedInRoom = false;
 
-    if (isHost) {
-      this.engine.resetGame();
-      this.engine.setLobbyConfig(this.lobbyConfig);
-    } else {
-      this.engine.setLobbyConfig(this.lobbyConfig);
-    }
+    this.engine.resetGame();
+    this.engine.setLobbyConfig(this.lobbyConfig);
 
     this.inputManager.setPlayMode('online', this.localPlayerId);
     this.inputManager.setEnabled(true);
@@ -941,6 +958,7 @@ export class ShiftGameApp {
     this.inputManager.setEnabled(false);
     this.mobileControls.setSessionMode(this.mode, this.localPlayerId, false);
     this.audioManager.stopAll();
+    this.entityInterpolator.reset();
     if (this.mode === 'online') {
       this.peerManager.disconnect();
     }
@@ -955,15 +973,158 @@ export class ShiftGameApp {
     }
 
     if (packet.type === 'input' && this.isOnlineHost) {
-      this.lastProcessedClientTick = Math.max(
-        this.lastProcessedClientTick,
-        packet.clientTick
-      );
       this.clientInputTracker.receivePacket(packet);
+      if (packet.clientTick >= this.lastProcessedClientTick) {
+        this.lastProcessedClientTick = packet.clientTick;
+        if (packet.clientState) {
+          this.engine.applyClientPlayerSync(packet.clientState);
+          this.entityInterpolator.recordRemotePlayerSync(2, packet.clientState);
+        }
+      }
     } else if (packet.type === 'state' && !this.isOnlineHost) {
+      if (packet.hostTick < this.lastReceivedHostTick) {
+        return;
+      }
+      this.lastReceivedHostTick = packet.hostTick;
+
+      const prevState = this.engine.getState();
+      const localP2 = prevState.players[1];
+      const savedLocalP2 = {
+        x: localP2.x,
+        y: localP2.y,
+        velocity: { x: localP2.velocity.x, y: localP2.velocity.y },
+        direction: localP2.direction,
+        flashLightDir: localP2.flashLightDir,
+        isMoving: localP2.isMoving,
+        boxColliding: localP2.boxColliding,
+        atDoorId: localP2.atDoorId,
+        interactingObjectId: localP2.interactingObjectId,
+        activePopupText: localP2.activePopupText,
+        popupFaceDirection: localP2.popupFaceDirection,
+      };
+      const savedBoxesById = new Map<string, { x: number; y: number }>();
+      if (
+        localP2.boxColliding &&
+        prevState.roomName === packet.state.roomName &&
+        prevState.roomsEntered === packet.state.roomsEntered &&
+        prevState.evilOnLeft === packet.state.evilOnLeft
+      ) {
+        for (const box of [
+          ...prevState.room.worlds.neutral.boxes,
+          ...prevState.room.worlds.dangerous.boxes,
+        ]) {
+          savedBoxesById.set(box.id, { x: box.x, y: box.y });
+        }
+      }
+
       this.engine.setState(packet.state);
       const state = this.engine.getState();
       const newEvents = this.eventDeduplicator.extractFromState(state);
+
+      const roomChanged =
+        prevState.roomName !== state.roomName ||
+        prevState.roomsEntered !== state.roomsEntered ||
+        newEvents.some((ev) => ev.type === 'roomChanged');
+      if (roomChanged) {
+        this.clientHasLocallySimulatedInRoom = false;
+      }
+      const shiftChanged =
+        prevState.evilOnLeft !== state.evilOnLeft ||
+        newEvents.some((ev) => ev.type === 'dimensionShifted');
+      const p1World = getWorldForSide('left', state.evilOnLeft);
+      const p2World = getWorldForSide('right', state.evilOnLeft);
+      const p1Grid = state.room.worlds[p1World];
+      const p2Grid = state.room.worlds[p2World];
+      const shiftIntoWall =
+        shiftChanged &&
+        doesPlayerCollideWithWalls(p2Grid, savedLocalP2.x, savedLocalP2.y);
+      const damagedOrDead =
+        newEvents.some(
+          (ev) => ev.type === 'playerDamaged' || ev.type === 'gameOver'
+        ) ||
+        !state.players[1].isAlive ||
+        state.phase !== 'playing';
+
+      const shouldSnapToHost =
+        !this.clientHasLocallySimulatedInRoom ||
+        roomChanged ||
+        damagedOrDead ||
+        shiftIntoWall;
+
+      if (!shouldSnapToHost) {
+        const nextP2 = state.players[1];
+        const hostP2X = nextP2.x;
+        const hostP2Y = nextP2.y;
+        nextP2.x = savedLocalP2.x;
+        nextP2.y = savedLocalP2.y;
+        nextP2.velocity = savedLocalP2.velocity;
+        nextP2.direction = savedLocalP2.direction;
+        nextP2.flashLightDir = savedLocalP2.flashLightDir;
+        nextP2.isMoving = savedLocalP2.isMoving;
+        nextP2.boxColliding = savedLocalP2.boxColliding;
+        nextP2.atDoorId = savedLocalP2.atDoorId;
+        nextP2.interactingObjectId = savedLocalP2.interactingObjectId;
+        nextP2.activePopupText = savedLocalP2.activePopupText;
+        nextP2.popupFaceDirection = savedLocalP2.popupFaceDirection;
+
+        if (savedBoxesById.size > 0) {
+          for (const box of p2Grid.boxes) {
+            const localBox = savedBoxesById.get(box.id);
+            if (
+              !localBox ||
+              Math.hypot(localBox.x - box.x, localBox.y - box.y) > 64
+            ) {
+              continue;
+            }
+            const linkedBox = p1Grid.boxes.find(
+              (b) => b.id === box.linkedBoxId
+            );
+            const localLinked = linkedBox
+              ? savedBoxesById.get(linkedBox.id)
+              : undefined;
+
+            const hostBoxX = box.x;
+            const hostBoxY = box.y;
+            const hostLinkedX = linkedBox ? linkedBox.x : 0;
+            const hostLinkedY = linkedBox ? linkedBox.y : 0;
+
+            box.x = localBox.x;
+            box.y = localBox.y;
+            if (linkedBox && localLinked) {
+              linkedBox.x = localLinked.x;
+              linkedBox.y = localLinked.y;
+            }
+
+            const blockedOnHost =
+              doesBoxCollide(p2Grid, box) ||
+              (linkedBox
+                ? doesBoxCollide(p1Grid, linkedBox, state.players[0])
+                : false);
+            if (blockedOnHost) {
+              box.x = hostBoxX;
+              box.y = hostBoxY;
+              if (linkedBox) {
+                linkedBox.x = hostLinkedX;
+                linkedBox.y = hostLinkedY;
+              }
+            }
+          }
+        }
+
+        if (findOverlappingBox(p2Grid, nextP2.x, nextP2.y) !== null) {
+          nextP2.x = hostP2X;
+          nextP2.y = hostP2Y;
+        }
+
+        const p1Tile = localPixelToTile(
+          state.players[0].x,
+          state.players[0].y
+        );
+        const p2Tile = localPixelToTile(nextP2.x, nextP2.y);
+        state.convergenceDistance = tileManhattanDistance(p1Tile, p2Tile);
+      }
+
+      this.entityInterpolator.recordSnapshot(state, this.localPlayerId);
       this.processGameEvents(newEvents);
       this.audioManager.updateAmbientAndLoops(
         state,
@@ -1060,15 +1221,40 @@ export class ShiftGameApp {
         });
       } else {
         // Online Client (Player 2, Right side):
-        // Send local input packet to Host
+        // Simulate Player 2 movement locally at 60Hz (zero input latency) and send
+        // input + clientState to Host.
         this.clientTickCounter++;
         const localInput = this.inputManager.getPlayerInput(2);
+        const state = this.engine.tickClientLocal(
+          SIMULATION_TICK_MS,
+          localInput
+        );
+        this.clientHasLocallySimulatedInRoom = true;
+        const p2 = state.players[1];
         this.peerManager.sendPacket({
           type: 'input',
           playerId: 2,
           clientTick: this.clientTickCounter,
           input: localInput,
+          clientState: {
+            roomName: state.roomName,
+            roomsEntered: state.roomsEntered,
+            evilOnLeft: state.evilOnLeft,
+            ackHostTick: this.lastReceivedHostTick,
+            x: p2.x,
+            y: p2.y,
+            velocity: { x: p2.velocity.x, y: p2.velocity.y },
+            direction: p2.direction,
+            flashLightDir: p2.flashLightDir,
+            isMoving: p2.isMoving,
+            boxColliding: p2.boxColliding,
+          },
         });
+        this.audioManager.updateAmbientAndLoops(
+          state,
+          this.localPlayerId,
+          this.mode
+        );
       }
     }
 
@@ -1105,20 +1291,32 @@ export class ShiftGameApp {
         this.lobbyConfig.testingMode ||
         state.lobbyConfig?.testingMode
     );
-    this.renderer.render(
-      state,
-      {
-        localPlayerId: this.localPlayerId,
-        mode: this.mode,
-        partnerVisibility: this.lobbyConfig.partnerVisibility,
-        lightingEnabled: this.lightingEnabled && !effectiveTestingMode,
-        testingMode: effectiveTestingMode,
-        cameraZoom: this.cameraZoom,
-        keyStrings,
-      },
-      dtMs
-    );
-    this.mobileControls.syncFromMainCanvas(this.canvas, state);
+    const restoreInterpolated =
+      this.mode === 'online'
+        ? this.entityInterpolator.applyToStateForRender(
+            state,
+            this.localPlayerId,
+            dtMs
+          )
+        : null;
+    try {
+      this.renderer.render(
+        state,
+        {
+          localPlayerId: this.localPlayerId,
+          mode: this.mode,
+          partnerVisibility: this.lobbyConfig.partnerVisibility,
+          lightingEnabled: this.lightingEnabled && !effectiveTestingMode,
+          testingMode: effectiveTestingMode,
+          cameraZoom: this.cameraZoom,
+          keyStrings,
+        },
+        dtMs
+      );
+      this.mobileControls.syncFromMainCanvas(this.canvas, state);
+    } finally {
+      restoreInterpolated?.();
+    }
   }
 
   private startAnimationFrameLoop(): void {

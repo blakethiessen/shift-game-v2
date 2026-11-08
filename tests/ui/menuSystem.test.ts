@@ -668,4 +668,38 @@ describe('MenuSystem', () => {
     input.pollGamepads();
     expect(onStartLocal).toHaveBeenCalledTimes(1);
   });
+
+  it('normalizes prefixed ?room=shift-k7m9p in initial URL search and resets COPIED! feedback when switching tabs or screens', () => {
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: peer,
+      initialUrlSearch: '?room=shift-k7m9p',
+    });
+
+    expect(peer.joinRoom).toHaveBeenCalledWith('K7M9P');
+
+    // Switch to Host tab and click COPY INVITE LINK
+    const hostTabBtn = container.querySelector(
+      '[data-testid="lobby-tab-host"]'
+    ) as HTMLButtonElement;
+    hostTabBtn.click();
+
+    const copyBtn = container.querySelector(
+      '[data-testid="copy-invite-btn"]'
+    ) as HTMLButtonElement;
+    expect(copyBtn.textContent).toBe('COPY INVITE LINK');
+    copyBtn.click();
+    expect(
+      container.querySelector('[data-testid="copy-invite-btn"]')?.textContent
+    ).toBe('COPIED!');
+
+    // Leaving lobby and returning resets copy feedback back to 'COPY INVITE LINK'
+    menu.showScreen('start');
+    menu.showScreen('lobby');
+    expect(
+      container.querySelector('[data-testid="copy-invite-btn"]')?.textContent
+    ).toBe('COPY INVITE LINK');
+  });
 });

@@ -68,6 +68,7 @@ export interface IPeerLike {
   readonly destroyed: boolean;
   readonly disconnected: boolean;
   readonly socket?: IPeerSocketLike;
+  readonly isCloudBroker?: boolean;
   _lostMessages?: Map<string, unknown[]>;
   connect(
     peerId: string,
@@ -105,7 +106,10 @@ const RELAY_CONNECTION_ID = 'shift_ws_relay';
 const RELAY_CANDIDATE_PREFIX = 'shift-relay:';
 const RELAY_SYN_RETRY_MS = 1000;
 const RELAY_MAX_BUFFERED_BYTES = 65536;
-const RELAY_MAX_CHUNK_CHARS = 28000;
+const RELAY_MAX_CHUNK_CHARS = 8000;
+const CLOUD_RELAY_MIN_INTERVAL_MS = 100;
+const CLOUD_RELAY_INPUT_MIN_INTERVAL_MS = 50;
+const MAX_RELAY_UNAVAILABLE_ERRORS = 60;
 
 interface RelayEnvelope {
   kind: 'syn' | 'ack' | 'data' | 'chunk' | 'close';
@@ -128,8 +132,9 @@ function sendRelayEnvelope(
       payload: {
         type: 'data',
         connectionId: RELAY_CONNECTION_ID,
+        relay: envelope,
         candidate: {
-          candidate: RELAY_CANDIDATE_PREFIX + JSON.stringify(envelope),
+          candidate: RELAY_CANDIDATE_PREFIX,
           sdpMid: '0',
           sdpMLineIndex: 0,
         },
@@ -138,6 +143,20 @@ function sendRelayEnvelope(
   } catch {
     // Ignore transient socket send errors
   }
+}
+
+function isValidRelayEnvelope(value: unknown): value is RelayEnvelope {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const kind = (value as { kind?: unknown }).kind;
+  return (
+    kind === 'syn' ||
+    kind === 'ack' ||
+    kind === 'data' ||
+    kind === 'chunk' ||
+    kind === 'close'
+  );
 }
 
 function parseRelayMessage(
@@ -152,6 +171,7 @@ function parseRelayMessage(
     src?: unknown;
     payload?: {
       connectionId?: unknown;
+      relay?: unknown;
       candidate?: {
         candidate?: unknown;
       };
@@ -168,6 +188,10 @@ function parseRelayMessage(
   // Prevent PeerJS from accumulating relay frames in _lostMessages
   peerInstance._lostMessages?.delete(RELAY_CONNECTION_ID);
 
+  if (isValidRelayEnvelope(msg.payload?.relay)) {
+    return { srcPeerId: msg.src, envelope: msg.payload.relay };
+  }
+
   const candidateStr = msg.payload?.candidate?.candidate;
   if (
     typeof candidateStr !== 'string' ||
@@ -176,19 +200,14 @@ function parseRelayMessage(
     return null;
   }
 
+  const suffix = candidateStr.slice(RELAY_CANDIDATE_PREFIX.length);
+  if (!suffix) {
+    return null;
+  }
+
   try {
-    const parsed = JSON.parse(
-      candidateStr.slice(RELAY_CANDIDATE_PREFIX.length)
-    ) as RelayEnvelope;
-    if (
-      parsed &&
-      typeof parsed === 'object' &&
-      (parsed.kind === 'syn' ||
-        parsed.kind === 'ack' ||
-        parsed.kind === 'data' ||
-        parsed.kind === 'chunk' ||
-        parsed.kind === 'close')
-    ) {
+    const parsed = JSON.parse(suffix) as unknown;
+    if (isValidRelayEnvelope(parsed)) {
       return { srcPeerId: msg.src, envelope: parsed };
     }
   } catch {
@@ -208,6 +227,12 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
   private readonly closeListeners = new Set<() => void>();
   private readonly errorListeners = new Set<(err: Error) => void>();
   private nextChunkId = 1;
+  private lastCloudSendTime = 0;
+  private lastInputSeqSig = '';
+  private cloudFlushTimerId: ReturnType<typeof setTimeout> | null = null;
+  private pendingCloudData: unknown = undefined;
+  private hasPendingCloudData = false;
+  private pendingCloudEvents: Array<{ eventId?: number; [k: string]: unknown }> = [];
   private readonly incomingChunks = new Map<
     number,
     { total: number; parts: string[]; received: number }
@@ -235,13 +260,144 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
     const buffered = this.peerInstance.socket._socket?.bufferedAmount ?? 0;
     if (buffered > RELAY_MAX_BUFFERED_BYTES && typeof data === 'string') {
       // Skip queuing redundant intermediate state snapshots if mobile TCP buffer is congested,
-      // unless the state snapshot carries discrete GameEvents.
+      // unless the state snapshot carries discrete GameEvents or pending coalesced events.
       if (
+        this.pendingCloudEvents.length === 0 &&
         data.includes('"type":"state"') &&
         data.includes('"events":[]')
       ) {
         return;
       }
+    }
+
+    // When relaying over PeerJS's public cloud broker (0.peerjs.com), coalesce 60Hz
+    // state/input updates to ~10Hz so 0.peerjs.com's burst rate limiter never drops the socket,
+    // while preserving any discrete GameEvents across coalesced state ticks.
+    if (this.peerInstance.isCloudBroker && typeof data === 'string') {
+      const isState = data.includes('"type":"state"');
+      const isInput = data.includes('"type":"input"');
+      if (isState && !data.includes('"events":[]')) {
+        this.captureStateEvents(data);
+      }
+      if (isState || isInput) {
+        let isDiscreteInputAction = false;
+        if (isInput) {
+          const seqMatch = data.match(/"interactSeq":\d+.*"pingSeq":\d+/);
+          const seqSig = seqMatch ? seqMatch[0] : '';
+          if (seqSig !== '' && seqSig !== this.lastInputSeqSig) {
+            this.lastInputSeqSig = seqSig;
+            isDiscreteInputAction = true;
+          }
+        }
+        const minIntervalMs = isDiscreteInputAction
+          ? 0
+          : isInput
+            ? CLOUD_RELAY_INPUT_MIN_INTERVAL_MS
+            : CLOUD_RELAY_MIN_INTERVAL_MS;
+        const now = Date.now();
+        const elapsed = now - this.lastCloudSendTime;
+        if (elapsed < minIntervalMs) {
+          this.pendingCloudData = data;
+          this.hasPendingCloudData = true;
+          if (this.cloudFlushTimerId === null) {
+            const waitMs = Math.max(10, minIntervalMs - elapsed);
+            this.cloudFlushTimerId = setTimeout(() => {
+              this.cloudFlushTimerId = null;
+              if (this.hasPendingCloudData && this.open) {
+                const payload = this.pendingCloudData;
+                this.pendingCloudData = undefined;
+                this.hasPendingCloudData = false;
+                this.lastCloudSendTime = Date.now();
+                this.dispatchWireData(this.mergePendingCloudEvents(payload));
+              }
+            }, waitMs);
+          }
+          return;
+        }
+        if (this.cloudFlushTimerId !== null) {
+          clearTimeout(this.cloudFlushTimerId);
+          this.cloudFlushTimerId = null;
+          this.pendingCloudData = undefined;
+          this.hasPendingCloudData = false;
+        }
+        this.lastCloudSendTime = now;
+        this.dispatchWireData(this.mergePendingCloudEvents(data));
+        return;
+      } else if (this.cloudFlushTimerId === null) {
+        this.lastCloudSendTime = Date.now();
+      }
+    }
+
+    this.dispatchWireData(data);
+  }
+
+  private captureStateEvents(rawStateJson: string): void {
+    try {
+      const parsed = JSON.parse(rawStateJson) as {
+        state?: { events?: Array<{ eventId?: number; [k: string]: unknown }> };
+      };
+      const evs = parsed?.state?.events;
+      if (!Array.isArray(evs)) {
+        return;
+      }
+      for (const ev of evs) {
+        if (
+          ev &&
+          typeof ev === 'object' &&
+          !this.pendingCloudEvents.some(
+            (existing) =>
+              existing.eventId !== undefined && existing.eventId === ev.eventId
+          )
+        ) {
+          this.pendingCloudEvents.push(ev);
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
+  private mergePendingCloudEvents(payload: unknown): unknown {
+    if (
+      this.pendingCloudEvents.length === 0 ||
+      typeof payload !== 'string' ||
+      !payload.includes('"type":"state"')
+    ) {
+      return payload;
+    }
+    try {
+      const parsed = JSON.parse(payload) as {
+        state?: { events?: Array<{ eventId?: number; [k: string]: unknown }> };
+      };
+      if (parsed?.state && Array.isArray(parsed.state.events)) {
+        const merged = [...this.pendingCloudEvents];
+        for (const ev of parsed.state.events) {
+          if (
+            ev &&
+            typeof ev === 'object' &&
+            !merged.some(
+              (existing) =>
+                existing.eventId !== undefined &&
+                existing.eventId === ev.eventId
+            )
+          ) {
+            merged.push(ev);
+          }
+        }
+        parsed.state.events = merged;
+        this.pendingCloudEvents = [];
+        return JSON.stringify(parsed);
+      }
+    } catch {
+      // Fall back to original payload
+    }
+    this.pendingCloudEvents = [];
+    return payload;
+  }
+
+  private dispatchWireData(data: unknown): void {
+    if (!this.open || !this.peerInstance.socket) {
+      return;
     }
     if (typeof data === 'string' && data.length > RELAY_MAX_CHUNK_CHARS) {
       const chunkId = this.nextChunkId++;
@@ -279,10 +435,15 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
       if (
         !this.open ||
         typeof envelope.chunkId !== 'number' ||
+        !Number.isInteger(envelope.chunkId) ||
         typeof envelope.index !== 'number' ||
+        !Number.isInteger(envelope.index) ||
         typeof envelope.total !== 'number' ||
+        !Number.isInteger(envelope.total) ||
         typeof envelope.part !== 'string' ||
+        envelope.part.length === 0 ||
         envelope.total <= 0 ||
+        envelope.total > 64 ||
         envelope.index < 0 ||
         envelope.index >= envelope.total
       ) {
@@ -302,6 +463,11 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
           received: 0,
         };
         this.incomingChunks.set(envelope.chunkId, entry);
+      } else if (
+        envelope.total !== entry.total ||
+        envelope.index >= entry.total
+      ) {
+        return;
       }
       if (entry.parts[envelope.index] === '') {
         entry.parts[envelope.index] = envelope.part;
@@ -324,6 +490,7 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
   }
 
   public closeQuietlyForUpgrade(): void {
+    this.clearCloudFlushTimer();
     this.open = false;
     this.openListeners.clear();
     this.dataListeners.clear();
@@ -331,7 +498,18 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
     this.errorListeners.clear();
   }
 
+  private clearCloudFlushTimer(): void {
+    if (this.cloudFlushTimerId !== null) {
+      clearTimeout(this.cloudFlushTimerId);
+      this.cloudFlushTimerId = null;
+    }
+    this.pendingCloudData = undefined;
+    this.hasPendingCloudData = false;
+    this.pendingCloudEvents = [];
+  }
+
   private closeInternal(notifyRemote: boolean): void {
+    this.clearCloudFlushTimer();
     if (!this.open) {
       return;
     }
@@ -470,6 +648,28 @@ export function buildIceServers(
   return servers;
 }
 
+const STATIC_HOSTING_SUFFIXES: readonly string[] = [
+  '.web.app',
+  '.firebaseapp.com',
+  '.github.io',
+  '.pages.dev',
+  '.vercel.app',
+  '.netlify.app',
+];
+
+function isStaticCloudHostname(hostname: string): boolean {
+  const lower = hostname.trim().toLowerCase();
+  return STATIC_HOSTING_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
+const PRE_OPEN_FALLBACK_ERROR_TYPES = new Set<string>([
+  'network',
+  'server-error',
+  'socket-error',
+  'socket-closed',
+  'disconnected',
+]);
+
 export function buildDefaultPeerServerOptions(
   loc?: { protocol?: string; hostname?: string; port?: string } | null
 ): PeerServerEndpointOptions | null {
@@ -478,6 +678,9 @@ export function buildDefaultPeerServerOptions(
     !loc.hostname ||
     (loc.protocol !== 'http:' && loc.protocol !== 'https:')
   ) {
+    return null;
+  }
+  if (isStaticCloudHostname(loc.hostname)) {
     return null;
   }
   const secure = loc.protocol === 'https:';
@@ -518,8 +721,11 @@ function defaultPeerFactory(
       : `shift-client-${Date.now().toString(36)}-${Math.random()
           .toString(36)
           .slice(2, 8)}`;
-  const peer = new Peer(resolvedId, peerOptions);
-  return peer as unknown as IPeerLike;
+  const peer = new Peer(resolvedId, peerOptions) as unknown as IPeerLike & {
+    isCloudBroker?: boolean;
+  };
+  peer.isCloudBroker = sameOriginOpts === null;
+  return peer;
 }
 
 function defaultNow(): number {
@@ -542,10 +748,12 @@ export class PeerManager implements IPeerManager {
   private roomCode: string | null = null;
   private connectionState: ConnectionState = 'disconnected';
   private rttMs = 0;
+  private preferCloudServer = false;
   private pingTimerId: ReturnType<typeof setInterval> | null = null;
   private joinTimerId: ReturnType<typeof setTimeout> | null = null;
   private relayFallbackTimerId: ReturnType<typeof setTimeout> | null = null;
   private relaySynIntervalId: ReturnType<typeof setInterval> | null = null;
+  private readonly attachedConnections = new WeakSet<IDataConnectionLike>();
 
   private readonly packetHandlers = new Set<(packet: NetPacket) => void>();
   private readonly stateHandlers = new Set<
@@ -596,172 +804,251 @@ export class PeerManager implements IPeerManager {
 
     return new Promise<string>((resolve, reject) => {
       let settled = false;
-      let peerInstance: IPeerLike;
 
-      try {
-        peerInstance = this.peerFactory(peerId, {
-          config: {
-            iceServers: this.iceServers,
-            sdpSemantics: 'unified-plan',
-          },
-        });
-        this.peer = peerInstance;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.setState('error', msg);
-        reject(new Error(msg));
-        return;
-      }
+      const startHostAttempt = (useCloudServer: boolean): void => {
+        let peerInstance: IPeerLike;
+        let fallbackTriggered = false;
 
-      if (peerInstance.socket) {
-        const socket = peerInstance.socket;
-        socket.on('message', (raw: unknown) => {
+        try {
+          peerInstance = this.peerFactory(peerId, {
+            useCloudServer,
+            config: {
+              iceServers: this.iceServers,
+              sdpSemantics: 'unified-plan',
+            },
+          });
+          this.peer = peerInstance;
+        } catch (err) {
+          if (!useCloudServer && !settled) {
+            this.preferCloudServer = true;
+            startHostAttempt(true);
+            return;
+          }
+          const msg = err instanceof Error ? err.message : String(err);
+          this.setState('error', msg);
+          if (!settled) {
+            settled = true;
+            reject(new Error(msg));
+          }
+          return;
+        }
+
+        const triggerCloudFallback = (): boolean => {
+          if (
+            useCloudServer ||
+            peerInstance.isCloudBroker ||
+            settled ||
+            fallbackTriggered ||
+            this.peer !== peerInstance
+          ) {
+            return false;
+          }
+          fallbackTriggered = true;
+          this.preferCloudServer = true;
+          this.peer = null;
+          try {
+            peerInstance.destroy();
+          } catch {
+            // Ignore destroy errors on failed same-origin peer
+          }
+          startHostAttempt(true);
+          return true;
+        };
+
+        let hostRelayUnavailableErrors = 0;
+
+        if (peerInstance.socket) {
+          const socket = peerInstance.socket;
+          socket.on('message', (raw: unknown) => {
+            if (this.peer !== peerInstance) {
+              return;
+            }
+            const parsed = parseRelayMessage(raw, peerInstance);
+            if (!parsed) {
+              return;
+            }
+            const { srcPeerId, envelope } = parsed;
+            if (
+              !this.dataConnection ||
+              this.dataConnection.peer === srcPeerId
+            ) {
+              hostRelayUnavailableErrors = 0;
+            }
+
+            if (envelope.kind === 'syn') {
+              // If already connected to a different partner, reject/ignore
+              if (
+                this.dataConnection &&
+                this.dataConnection.open &&
+                this.dataConnection.peer !== srcPeerId
+              ) {
+                return;
+              }
+              // If direct WebRTC is already open with this partner, no relay needed
+              if (
+                this.dataConnection &&
+                this.dataConnection.open &&
+                !this.dataConnection.isRelay &&
+                this.dataConnection.peer === srcPeerId
+              ) {
+                return;
+              }
+              // If relay is already open with this partner, re-ACK idempotently
+              if (
+                this.dataConnection instanceof PeerSocketRelayConnection &&
+                this.dataConnection.open &&
+                this.dataConnection.peer === srcPeerId
+              ) {
+                sendRelayEnvelope(socket, srcPeerId, { kind: 'ack' });
+                return;
+              }
+
+              const relayConn = new PeerSocketRelayConnection(
+                srcPeerId,
+                peerInstance
+              );
+              sendRelayEnvelope(socket, srcPeerId, { kind: 'ack' });
+              this.attachDataConnection(relayConn);
+              relayConn.markOpen();
+              return;
+            }
+
+            if (
+              this.dataConnection instanceof PeerSocketRelayConnection &&
+              this.dataConnection.peer === srcPeerId
+            ) {
+              this.dataConnection.receiveEnvelope(envelope);
+            }
+          });
+        }
+
+        peerInstance.on('open', () => {
           if (this.peer !== peerInstance) {
             return;
           }
-          const parsed = parseRelayMessage(raw, peerInstance);
-          if (!parsed) {
-            return;
-          }
-          const { srcPeerId, envelope } = parsed;
-
-          if (envelope.kind === 'syn') {
-            // If already connected to a different partner, reject/ignore
-            if (
-              this.dataConnection &&
-              this.dataConnection.open &&
-              this.dataConnection.peer !== srcPeerId
-            ) {
-              return;
-            }
-            // If direct WebRTC is already open with this partner, no relay needed
-            if (
-              this.dataConnection &&
-              this.dataConnection.open &&
-              !this.dataConnection.isRelay &&
-              this.dataConnection.peer === srcPeerId
-            ) {
-              return;
-            }
-            // If relay is already open with this partner, re-ACK idempotently
-            if (
-              this.dataConnection instanceof PeerSocketRelayConnection &&
-              this.dataConnection.open &&
-              this.dataConnection.peer === srcPeerId
-            ) {
-              sendRelayEnvelope(socket, srcPeerId, { kind: 'ack' });
-              return;
-            }
-
-            const relayConn = new PeerSocketRelayConnection(
-              srcPeerId,
-              peerInstance
-            );
-            sendRelayEnvelope(socket, srcPeerId, { kind: 'ack' });
-            this.attachDataConnection(relayConn);
-            relayConn.markOpen();
-            return;
-          }
-
-          if (
-            this.dataConnection instanceof PeerSocketRelayConnection &&
-            this.dataConnection.peer === srcPeerId
-          ) {
-            this.dataConnection.receiveEnvelope(envelope);
+          if (!settled) {
+            settled = true;
+            resolve(code);
           }
         });
-      }
 
-      peerInstance.on('open', () => {
-        if (this.peer !== peerInstance) {
-          return;
-        }
-        if (!settled) {
-          settled = true;
-          resolve(code);
-        }
-      });
-
-      peerInstance.on('connection', (conn: IDataConnectionLike) => {
-        if (this.peer !== peerInstance) {
-          return;
-        }
-        // If already connected via direct WebRTC, or connected to a different peer, reject
-        if (this.dataConnection && this.dataConnection.open) {
-          if (
-            this.dataConnection.isRelay &&
-            this.dataConnection.peer === conn.peer
-          ) {
-            // Allow direct WebRTC connection from same partner to upgrade the WS relay once open
-            this.watchWebRtcUpgrade(conn);
+        peerInstance.on('connection', (conn: IDataConnectionLike) => {
+          if (this.peer !== peerInstance) {
             return;
           }
-          conn.close();
-          return;
-        }
-        this.attachDataConnection(conn);
-        // Also watch in case WS relay connects first while conn is still negotiating ICE
-        this.watchWebRtcUpgrade(conn);
-      });
-
-      peerInstance.on('disconnected', () => {
-        if (this.peer !== peerInstance || peerInstance.destroyed) {
-          return;
-        }
-        // Reconnect signaling broker if waiting in lobby ('hosting') or using WS signaling relay
-        if (
-          this.connectionState === 'hosting' ||
-          (this.connectionState === 'connected' && this.dataConnection?.isRelay)
-        ) {
-          this.tryReconnectPeer(peerInstance);
-        }
-      });
-
-      peerInstance.on('error', (err: Error & { type?: string }) => {
-        if (this.peer !== peerInstance) {
-          return;
-        }
-        const errType = err?.type ?? '';
-
-        // Ignore non-fatal WebRTC ICE candidate errors (e.g. mobile multi-interface /
-        // IPv6 / mDNS candidate rejection during Trickle ICE negotiation).
-        if (errType === 'webrtc') {
-          return;
-        }
-
-        // Ignore signaling broker drops once P2P DataChannel is already open & active,
-        // or auto-reconnect signaling while waiting in lobby ('hosting') or using WS relay.
-        if (NON_FATAL_SIGNALING_ERROR_TYPES.has(errType)) {
-          if (this.connectionState === 'connected' && this.dataConnection?.open) {
-            if (this.dataConnection.isRelay) {
-              this.tryReconnectPeer(peerInstance);
+          // If already connected via direct WebRTC, or connected to a different peer, reject
+          if (this.dataConnection && this.dataConnection.open) {
+            if (
+              this.dataConnection.isRelay &&
+              this.dataConnection.peer === conn.peer
+            ) {
+              // Allow direct WebRTC connection from same partner to upgrade the WS relay once open
+              this.watchWebRtcUpgrade(conn);
+              return;
             }
+            conn.close();
             return;
           }
-          if (this.connectionState === 'hosting' && settled) {
+          this.attachDataConnection(conn);
+          // Also watch in case WS relay connects first while conn is still negotiating ICE
+          this.watchWebRtcUpgrade(conn);
+        });
+
+        peerInstance.on('disconnected', () => {
+          if (this.peer !== peerInstance || peerInstance.destroyed) {
+            return;
+          }
+          if (!settled && triggerCloudFallback()) {
+            return;
+          }
+          // Reconnect signaling broker if waiting in lobby ('hosting') or using WS signaling relay
+          if (
+            this.connectionState === 'hosting' ||
+            (this.connectionState === 'connected' && this.dataConnection?.isRelay)
+          ) {
             this.tryReconnectPeer(peerInstance);
+          }
+        });
+
+        peerInstance.on('error', (err: Error & { type?: string }) => {
+          if (this.peer !== peerInstance) {
             return;
           }
-        }
+          const errType = err?.type ?? '';
 
-        const msg = err?.message || err?.type || 'Peer host error';
-        this.stopPingLoop();
-        this.setState('error', msg);
-        if (!settled) {
-          settled = true;
-          reject(new Error(msg));
-        }
-      });
+          // Ignore non-fatal WebRTC ICE candidate errors (e.g. mobile multi-interface /
+          // IPv6 / mDNS candidate rejection during Trickle ICE negotiation).
+          if (errType === 'webrtc') {
+            return;
+          }
 
-      peerInstance.on('close', () => {
-        if (this.peer !== peerInstance) {
-          return;
-        }
-        this.stopPingLoop();
-        if (this.connectionState !== 'error' && this.connectionState !== 'disconnected') {
-          this.setState('disconnected');
-        }
-      });
+          // If same-origin signaling server (/shift-peerjs/) is unreachable before open,
+          // transparently fall back to PeerJS's cloud broker without flashing an error.
+          if (
+            !settled &&
+            (PRE_OPEN_FALLBACK_ERROR_TYPES.has(errType) || errType === '') &&
+            triggerCloudFallback()
+          ) {
+            return;
+          }
+
+          // Ignore signaling broker drops once P2P DataChannel is already open & active,
+          // or auto-reconnect signaling while waiting in lobby ('hosting') or using WS relay.
+          if (NON_FATAL_SIGNALING_ERROR_TYPES.has(errType)) {
+            if (this.connectionState === 'connected' && this.dataConnection?.open) {
+              if (this.dataConnection.isRelay) {
+                this.tryReconnectPeer(peerInstance);
+              }
+              return;
+            }
+            if (this.connectionState === 'hosting' && settled) {
+              this.tryReconnectPeer(peerInstance);
+              return;
+            }
+          }
+
+          // Ignore expired WebRTC OFFER/CANDIDATE notices once hosting/connected,
+          // or tolerate brief Client signaling reconnects on WS relay (< MAX_RELAY_UNAVAILABLE_ERRORS misses).
+          if (
+            errType === 'peer-unavailable' &&
+            settled &&
+            (this.connectionState === 'connected' ||
+              this.connectionState === 'hosting')
+          ) {
+            if (!this.dataConnection?.isRelay) {
+              return;
+            }
+            hostRelayUnavailableErrors++;
+            if (hostRelayUnavailableErrors < MAX_RELAY_UNAVAILABLE_ERRORS) {
+              return;
+            }
+          }
+
+          const msg = err?.message || err?.type || 'Peer host error';
+          this.stopPingLoop();
+          this.closeActiveDataConnection();
+          this.setState('error', msg);
+          if (!settled) {
+            settled = true;
+            reject(new Error(msg));
+          }
+        });
+
+        peerInstance.on('close', () => {
+          if (this.peer !== peerInstance) {
+            return;
+          }
+          if (!settled && triggerCloudFallback()) {
+            return;
+          }
+          this.stopPingLoop();
+          if (this.connectionState !== 'error' && this.connectionState !== 'disconnected') {
+            this.setState('disconnected');
+          }
+        });
+      };
+
+      startHostAttempt(this.preferCloudServer);
     });
   }
 
@@ -781,24 +1068,6 @@ export class PeerManager implements IPeerManager {
 
     return new Promise<void>((resolve, reject) => {
       let settled = false;
-      let peerInstance: IPeerLike;
-
-      try {
-        peerInstance = this.peerFactory(undefined, {
-          config: {
-            iceServers: this.iceServers,
-            sdpSemantics: 'unified-plan',
-          },
-        });
-        this.peer = peerInstance;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.setState('error', msg);
-        reject(new Error(msg));
-        return;
-      }
-
-      const hasRelaySupport = Boolean(peerInstance.socket);
 
       const succeedJoin = (): void => {
         this.clearJoinTimer();
@@ -813,6 +1082,7 @@ export class PeerManager implements IPeerManager {
         this.clearJoinTimer();
         this.clearRelayTimers();
         this.stopPingLoop();
+        this.closeActiveDataConnection();
         this.setState('error', msg);
         if (!settled) {
           settled = true;
@@ -820,73 +1090,9 @@ export class PeerManager implements IPeerManager {
         }
       };
 
-      const startRelaySynLoop = (): void => {
-        if (
-          !peerInstance.socket ||
-          this.peer !== peerInstance ||
-          settled ||
-          (this.dataConnection && this.dataConnection.open)
-        ) {
-          return;
-        }
-        this.clearRelayTimers();
-        const socket = peerInstance.socket;
-        sendRelayEnvelope(socket, targetPeerId, { kind: 'syn' });
-        this.relaySynIntervalId = setInterval(() => {
-          if (
-            this.peer !== peerInstance ||
-            settled ||
-            (this.dataConnection && this.dataConnection.open)
-          ) {
-            this.clearRelayTimers();
-            return;
-          }
-          sendRelayEnvelope(socket, targetPeerId, { kind: 'syn' });
-        }, RELAY_SYN_RETRY_MS);
-      };
-
-      let relayUnavailableErrors = 0;
-
-      if (peerInstance.socket) {
-        const socket = peerInstance.socket;
-        socket.on('message', (raw: unknown) => {
-          if (this.peer !== peerInstance) {
-            return;
-          }
-          const parsed = parseRelayMessage(raw, peerInstance);
-          if (!parsed || parsed.srcPeerId !== targetPeerId) {
-            return;
-          }
-          relayUnavailableErrors = 0;
-          const { envelope } = parsed;
-
-          if (envelope.kind === 'ack') {
-            this.clearRelayTimers();
-            // If direct WebRTC already opened, ignore
-            if (this.dataConnection && this.dataConnection.open) {
-              return;
-            }
-            const relayConn = new PeerSocketRelayConnection(
-              targetPeerId,
-              peerInstance
-            );
-            this.attachDataConnection(relayConn, succeedJoin, failJoin);
-            relayConn.markOpen();
-            return;
-          }
-
-          if (
-            this.dataConnection instanceof PeerSocketRelayConnection &&
-            this.dataConnection.peer === targetPeerId
-          ) {
-            this.dataConnection.receiveEnvelope(envelope);
-          }
-        });
-      }
-
       if (this.joinTimeoutMs > 0) {
         this.joinTimerId = setTimeout(() => {
-          if (this.peer !== peerInstance || settled) {
+          if (!this.peer || settled) {
             return;
           }
           const pendingConn = this.dataConnection;
@@ -904,117 +1110,251 @@ export class PeerManager implements IPeerManager {
         }, this.joinTimeoutMs);
       }
 
-      peerInstance.on('open', () => {
-        if (this.peer !== peerInstance) {
-          return;
-        }
-        try {
-          const conn = peerInstance.connect(targetPeerId, {
-            reliable: true,
-          });
-          this.attachDataConnection(
-            conn,
-            succeedJoin,
-            (errMsg) => {
-              // If signaling WebSocket relay is available, don't abort on WebRTC ICE failure;
-              // immediately trigger the WS relay handshake instead.
-              if (hasRelaySupport && !settled) {
-                startRelaySynLoop();
-                return;
-              }
-              failJoin(errMsg);
-            }
-          );
-          this.watchWebRtcUpgrade(conn, succeedJoin);
+      const startJoinAttempt = (useCloudServer: boolean): void => {
+        let peerInstance: IPeerLike;
+        let peerOpened = false;
+        let fallbackTriggered = false;
 
-          if (hasRelaySupport) {
-            if (this.relayFallbackDelayMs <= 0) {
-              startRelaySynLoop();
-            } else {
-              this.relayFallbackTimerId = setTimeout(() => {
-                startRelaySynLoop();
-              }, this.relayFallbackDelayMs);
-            }
-          }
+        try {
+          peerInstance = this.peerFactory(undefined, {
+            useCloudServer,
+            config: {
+              iceServers: this.iceServers,
+              sdpSemantics: 'unified-plan',
+            },
+          });
+          this.peer = peerInstance;
         } catch (err) {
-          if (hasRelaySupport && !settled) {
-            startRelaySynLoop();
+          if (!useCloudServer && !settled) {
+            this.preferCloudServer = true;
+            startJoinAttempt(true);
             return;
           }
           const msg = err instanceof Error ? err.message : String(err);
           failJoin(msg);
-        }
-      });
-
-      peerInstance.on('disconnected', () => {
-        if (this.peer !== peerInstance || peerInstance.destroyed) {
-          return;
-        }
-        if (this.connectionState === 'connected' && this.dataConnection?.isRelay) {
-          this.tryReconnectPeer(peerInstance);
-        }
-      });
-
-      peerInstance.on('error', (err: Error & { type?: string }) => {
-        if (this.peer !== peerInstance) {
-          return;
-        }
-        const errType = err?.type ?? '';
-
-        // Ignore non-fatal WebRTC ICE candidate warnings during mobile negotiation
-        if (errType === 'webrtc') {
           return;
         }
 
-        // Ignore signaling server drops once P2P DataChannel is already open,
-        // or reconnect signaling if using WS relay.
-        if (
-          NON_FATAL_SIGNALING_ERROR_TYPES.has(errType) &&
-          this.connectionState === 'connected' &&
-          this.dataConnection?.open
-        ) {
-          if (this.dataConnection.isRelay) {
+        const triggerCloudFallback = (): boolean => {
+          if (
+            useCloudServer ||
+            peerInstance.isCloudBroker ||
+            peerOpened ||
+            settled ||
+            fallbackTriggered ||
+            this.peer !== peerInstance
+          ) {
+            return false;
+          }
+          fallbackTriggered = true;
+          this.preferCloudServer = true;
+          this.clearRelayTimers();
+          this.peer = null;
+          try {
+            peerInstance.destroy();
+          } catch {
+            // Ignore destroy errors on failed same-origin peer
+          }
+          startJoinAttempt(true);
+          return true;
+        };
+
+        const hasRelaySupport = Boolean(peerInstance.socket);
+
+        const startRelaySynLoop = (): void => {
+          if (
+            !peerInstance.socket ||
+            this.peer !== peerInstance ||
+            settled ||
+            (this.dataConnection && this.dataConnection.open)
+          ) {
+            return;
+          }
+          this.clearRelayTimers();
+          const socket = peerInstance.socket;
+          sendRelayEnvelope(socket, targetPeerId, { kind: 'syn' });
+          this.relaySynIntervalId = setInterval(() => {
+            if (
+              this.peer !== peerInstance ||
+              settled ||
+              (this.dataConnection && this.dataConnection.open)
+            ) {
+              this.clearRelayTimers();
+              return;
+            }
+            sendRelayEnvelope(socket, targetPeerId, { kind: 'syn' });
+          }, RELAY_SYN_RETRY_MS);
+        };
+
+        let relayUnavailableErrors = 0;
+
+        if (peerInstance.socket) {
+          const socket = peerInstance.socket;
+          socket.on('message', (raw: unknown) => {
+            if (this.peer !== peerInstance) {
+              return;
+            }
+            const parsed = parseRelayMessage(raw, peerInstance);
+            if (!parsed || parsed.srcPeerId !== targetPeerId) {
+              return;
+            }
+            relayUnavailableErrors = 0;
+            const { envelope } = parsed;
+
+            if (envelope.kind === 'ack') {
+              this.clearRelayTimers();
+              // If direct WebRTC already opened, ignore
+              if (this.dataConnection && this.dataConnection.open) {
+                return;
+              }
+              const relayConn = new PeerSocketRelayConnection(
+                targetPeerId,
+                peerInstance
+              );
+              this.attachDataConnection(relayConn, succeedJoin, failJoin);
+              relayConn.markOpen();
+              return;
+            }
+
+            if (
+              this.dataConnection instanceof PeerSocketRelayConnection &&
+              this.dataConnection.peer === targetPeerId
+            ) {
+              this.dataConnection.receiveEnvelope(envelope);
+            }
+          });
+        }
+
+        peerInstance.on('open', () => {
+          if (this.peer !== peerInstance || peerOpened) {
+            return;
+          }
+          peerOpened = true;
+          try {
+            const conn = peerInstance.connect(targetPeerId, {
+              reliable: true,
+            });
+            this.attachDataConnection(
+              conn,
+              succeedJoin,
+              (errMsg) => {
+                // If signaling WebSocket relay is available, don't abort on WebRTC ICE failure;
+                // immediately trigger the WS relay handshake instead.
+                if (hasRelaySupport && !settled) {
+                  startRelaySynLoop();
+                  return;
+                }
+                failJoin(errMsg);
+              }
+            );
+            this.watchWebRtcUpgrade(conn, succeedJoin);
+
+            if (hasRelaySupport) {
+              if (this.relayFallbackDelayMs <= 0) {
+                startRelaySynLoop();
+              } else {
+                this.relayFallbackTimerId = setTimeout(() => {
+                  startRelaySynLoop();
+                }, this.relayFallbackDelayMs);
+              }
+            }
+          } catch (err) {
+            if (hasRelaySupport && !settled) {
+              startRelaySynLoop();
+              return;
+            }
+            const msg = err instanceof Error ? err.message : String(err);
+            failJoin(msg);
+          }
+        });
+
+        peerInstance.on('disconnected', () => {
+          if (this.peer !== peerInstance || peerInstance.destroyed) {
+            return;
+          }
+          if (!peerOpened && !settled && triggerCloudFallback()) {
+            return;
+          }
+          if (this.connectionState === 'connected' && this.dataConnection?.isRelay) {
             this.tryReconnectPeer(peerInstance);
           }
-          return;
-        }
+        });
 
-        // Ignore expired WebRTC OFFER/CANDIDATE notices once connected,
-        // or tolerate brief Host signaling reconnects on WS relay (< 5 consecutive misses).
-        if (
-          errType === 'peer-unavailable' &&
-          settled &&
-          this.connectionState === 'connected' &&
-          this.dataConnection?.open
-        ) {
-          if (!this.dataConnection.isRelay) {
+        peerInstance.on('error', (err: Error & { type?: string }) => {
+          if (this.peer !== peerInstance) {
             return;
           }
-          relayUnavailableErrors++;
-          if (relayUnavailableErrors < 5) {
+          const errType = err?.type ?? '';
+
+          // Ignore non-fatal WebRTC ICE candidate warnings during mobile negotiation
+          if (errType === 'webrtc') {
             return;
           }
-        }
 
-        const msg = err?.message || err?.type || 'Unable to connect to room';
-        failJoin(msg);
-      });
+          if (
+            !peerOpened &&
+            !settled &&
+            (PRE_OPEN_FALLBACK_ERROR_TYPES.has(errType) || errType === '') &&
+            triggerCloudFallback()
+          ) {
+            return;
+          }
 
-      peerInstance.on('close', () => {
-        if (this.peer !== peerInstance) {
-          return;
-        }
-        this.clearJoinTimer();
-        this.clearRelayTimers();
-        this.stopPingLoop();
-        if (!settled) {
-          failJoin('Connection closed before room handshake completed');
-          return;
-        }
-        if (this.connectionState !== 'error' && this.connectionState !== 'disconnected') {
-          this.setState('disconnected');
-        }
-      });
+          // Ignore signaling server drops once P2P DataChannel is already open,
+          // or reconnect signaling if using WS relay.
+          if (
+            NON_FATAL_SIGNALING_ERROR_TYPES.has(errType) &&
+            this.connectionState === 'connected' &&
+            this.dataConnection?.open
+          ) {
+            if (this.dataConnection.isRelay) {
+              this.tryReconnectPeer(peerInstance);
+            }
+            return;
+          }
+
+          // Ignore expired WebRTC OFFER/CANDIDATE notices once connected,
+          // or tolerate brief Host signaling reconnects on WS relay (< MAX_RELAY_UNAVAILABLE_ERRORS misses).
+          if (
+            errType === 'peer-unavailable' &&
+            settled &&
+            this.connectionState === 'connected' &&
+            this.dataConnection?.open
+          ) {
+            if (!this.dataConnection.isRelay) {
+              return;
+            }
+            relayUnavailableErrors++;
+            if (relayUnavailableErrors < MAX_RELAY_UNAVAILABLE_ERRORS) {
+              return;
+            }
+          }
+
+          const msg = err?.message || err?.type || 'Unable to connect to room';
+          failJoin(msg);
+        });
+
+        peerInstance.on('close', () => {
+          if (this.peer !== peerInstance) {
+            return;
+          }
+          if (!peerOpened && !settled && triggerCloudFallback()) {
+            return;
+          }
+          this.clearJoinTimer();
+          this.clearRelayTimers();
+          this.stopPingLoop();
+          if (!settled) {
+            failJoin('Connection closed before room handshake completed');
+            return;
+          }
+          if (this.connectionState !== 'error' && this.connectionState !== 'disconnected') {
+            this.setState('disconnected');
+          }
+        });
+      };
+
+      startJoinAttempt(this.preferCloudServer);
     });
   }
 
@@ -1055,14 +1395,28 @@ export class PeerManager implements IPeerManager {
     this.cleanupInternal(true);
   }
 
+  private closeActiveDataConnection(): void {
+    const activeConn = this.dataConnection;
+    this.dataConnection = null;
+    if (activeConn) {
+      try {
+        activeConn.close();
+      } catch {
+        // Ignore close errors
+      }
+    }
+  }
+
   private attachDataConnection(
     conn: IDataConnectionLike,
     onConnected?: () => void,
     onConnectError?: (msg: string) => void
   ): void {
     this.dataConnection = conn;
+    let everOpened = conn.open;
 
     const handleOpen = (): void => {
+      everOpened = true;
       if (this.dataConnection !== conn) {
         return;
       }
@@ -1073,61 +1427,74 @@ export class PeerManager implements IPeerManager {
       }
     };
 
-    conn.on('open', handleOpen);
+    if (!this.attachedConnections.has(conn)) {
+      this.attachedConnections.add(conn);
 
-    conn.on('data', (rawData: unknown) => {
-      if (this.dataConnection !== conn) {
-        return;
-      }
-      const packet = deserializePacket(rawData);
-      if (!packet) {
-        return;
-      }
+      conn.on('open', handleOpen);
 
-      if (packet.type === 'ping') {
-        this.sendPacket({
-          type: 'pong',
-          timestamp: packet.timestamp,
-        });
-      } else if (packet.type === 'pong') {
-        const elapsed = this.now() - packet.timestamp;
-        if (Number.isFinite(elapsed) && elapsed >= 0) {
-          this.rttMs = Math.round(elapsed);
+      conn.on('data', (rawData: unknown) => {
+        if (this.dataConnection !== conn) {
+          return;
         }
-      }
+        const packet = deserializePacket(rawData);
+        if (!packet) {
+          return;
+        }
 
-      for (const handler of Array.from(this.packetHandlers)) {
-        handler(packet);
-      }
-    });
+        if (packet.type === 'ping') {
+          this.sendPacket({
+            type: 'pong',
+            timestamp: packet.timestamp,
+          });
+        } else if (packet.type === 'pong') {
+          const elapsed = this.now() - packet.timestamp;
+          if (Number.isFinite(elapsed) && elapsed >= 0) {
+            this.rttMs = Math.round(elapsed);
+          }
+        }
 
-    conn.on('close', () => {
-      if (this.dataConnection !== conn) {
-        return;
-      }
-      this.stopPingLoop();
-      this.dataConnection = null;
-      if (this.connectionState === 'joining' && onConnectError) {
-        onConnectError('Data connection closed during join');
-        return;
-      }
-      if (this.connectionState !== 'disconnected' && this.connectionState !== 'error') {
-        this.setState('disconnected');
-      }
-    });
+        for (const handler of Array.from(this.packetHandlers)) {
+          handler(packet);
+        }
+      });
 
-    conn.on('error', (err: Error) => {
-      if (this.dataConnection !== conn) {
-        return;
-      }
-      const msg = err?.message || 'DataChannel error';
-      this.stopPingLoop();
-      if (onConnectError && this.connectionState === 'joining') {
-        onConnectError(msg);
-      } else {
-        this.setState('error', msg);
-      }
-    });
+      conn.on('close', () => {
+        if (this.dataConnection !== conn) {
+          return;
+        }
+        if (this.connectionState === 'hosting' && !everOpened) {
+          this.dataConnection = null;
+          return;
+        }
+        this.stopPingLoop();
+        this.dataConnection = null;
+        if (this.connectionState === 'joining' && onConnectError) {
+          onConnectError('Data connection closed during join');
+          return;
+        }
+        if (this.connectionState !== 'disconnected' && this.connectionState !== 'error') {
+          this.setState('disconnected');
+        }
+      });
+
+      conn.on('error', (err: Error) => {
+        if (this.dataConnection !== conn) {
+          return;
+        }
+        if (this.connectionState === 'hosting' && !everOpened) {
+          this.dataConnection = null;
+          return;
+        }
+        const msg = err?.message || 'DataChannel error';
+        this.stopPingLoop();
+        if (onConnectError && this.connectionState === 'joining') {
+          onConnectError(msg);
+        } else {
+          this.closeActiveDataConnection();
+          this.setState('error', msg);
+        }
+      });
+    }
 
     if (conn.open) {
       handleOpen();
@@ -1205,7 +1572,22 @@ export class PeerManager implements IPeerManager {
     try {
       peerInstance.reconnect();
     } catch {
-      // Ignore reconnect errors
+      // PeerJS emits 'error' (type: 'network') one statement before calling this.disconnect(),
+      // so if reconnect() threw because peerInstance.disconnected was still false, retry on microtask.
+      queueMicrotask(() => {
+        if (
+          this.peer === peerInstance &&
+          !peerInstance.destroyed &&
+          peerInstance.disconnected &&
+          typeof peerInstance.reconnect === 'function'
+        ) {
+          try {
+            peerInstance.reconnect();
+          } catch {
+            // Ignore reconnect errors
+          }
+        }
+      });
     }
   }
 

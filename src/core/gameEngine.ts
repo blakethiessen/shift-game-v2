@@ -5,6 +5,7 @@
 import { RAW_LEVELS } from './levelData';
 import {
   createEmptyRoomPersistence,
+  getStaticRoomCells,
   parseRoom,
 } from './levelParser';
 import {
@@ -19,6 +20,7 @@ import {
   emitEvent,
   PlayerSeqTracker,
   takeDamage,
+  updateLocalPlayerMovementAndHover,
   updateSinglePlayer,
 } from './playerLogic';
 import {
@@ -26,6 +28,7 @@ import {
   updateWorldObjectsAndDoors,
 } from './worldObjectsLogic';
 import {
+  ClientPlayerSyncState,
   createDefaultLobbyConfig,
   DIM_HEIGHT_PX,
   DIM_WIDTH_PX,
@@ -111,6 +114,9 @@ export class GameEngine implements IGameEngine {
   };
   private lastP1ShiftSeq = 0;
   private lastP2ShiftSeq = 0;
+  private lastP2ForcedTeleportTick = 0;
+  private pendingClientP2Sync: ClientPlayerSyncState | null = null;
+  private hasClientPlayerSync = false;
 
   constructor(seed: number = 0x5f3759df) {
     this.resetGame(seed);
@@ -134,6 +140,9 @@ export class GameEngine implements IGameEngine {
     };
     this.lastP1ShiftSeq = 0;
     this.lastP2ShiftSeq = 0;
+    this.lastP2ForcedTeleportTick = 0;
+    this.pendingClientP2Sync = null;
+    this.hasClientPlayerSync = false;
 
     const persistence = createInitialPersistenceMap();
     const initialRoomName = 'spawnRoom';
@@ -284,6 +293,9 @@ export class GameEngine implements IGameEngine {
     this.state.players[0].activePopupText = null;
     this.state.players[1].activePopupText = null;
 
+    this.lastP2ForcedTeleportTick = this.state.tick;
+    this.pendingClientP2Sync = null;
+
     openSafesInRoom(this.state);
 
     emitEvent(this.state, {
@@ -302,8 +314,78 @@ export class GameEngine implements IGameEngine {
   }
 
   public setState(snapshot: GameState): void {
-    this.state = structuredClone(snapshot);
+    const staticCells = getStaticRoomCells(snapshot.roomName);
+    const neutralWorld = snapshot.room?.worlds?.neutral;
+    const dangerousWorld = snapshot.room?.worlds?.dangerous;
+
+    if (staticCells && neutralWorld && dangerousWorld) {
+      const prevNeutralCells = neutralWorld.cells;
+      const prevDangerousCells = dangerousWorld.cells;
+      try {
+        neutralWorld.cells = [];
+        dangerousWorld.cells = [];
+        this.state = structuredClone(snapshot);
+      } finally {
+        neutralWorld.cells =
+          Array.isArray(prevNeutralCells) && prevNeutralCells.length > 0
+            ? prevNeutralCells
+            : staticCells.neutral;
+        dangerousWorld.cells =
+          Array.isArray(prevDangerousCells) && prevDangerousCells.length > 0
+            ? prevDangerousCells
+            : staticCells.dangerous;
+      }
+      this.state.room.worlds.neutral.cells = staticCells.neutral;
+      this.state.room.worlds.dangerous.cells = staticCells.dangerous;
+    } else {
+      this.state = structuredClone(snapshot);
+    }
     this.rng.setState(this.state.rngState);
+  }
+
+  public applyClientPlayerSync(sync: ClientPlayerSyncState): void {
+    this.hasClientPlayerSync = true;
+    if (
+      this.state.isPaused ||
+      this.state.phase !== 'playing' ||
+      !this.state.players[1].isAlive
+    ) {
+      return;
+    }
+    if (
+      sync.roomName !== this.state.roomName ||
+      sync.roomsEntered !== this.state.roomsEntered
+    ) {
+      return;
+    }
+    if (sync.evilOnLeft !== this.state.evilOnLeft) {
+      const p2World = getWorldForSide('right', this.state.evilOnLeft);
+      const p2Grid = this.state.room.worlds[p2World];
+      if (doesPlayerCollideWithWalls(p2Grid, sync.x, sync.y)) {
+        return;
+      }
+    }
+    if (sync.ackHostTick < this.lastP2ForcedTeleportTick) {
+      return;
+    }
+    this.pendingClientP2Sync = sync;
+  }
+
+  public tickClientLocal(dtMs: number, p2Input: PlayerInput): GameState {
+    if (this.state.isPaused || this.state.phase !== 'playing') {
+      return this.state;
+    }
+    updateLocalPlayerMovementAndHover(this.state, 1, dtMs, p2Input);
+    const p1Tile = localPixelToTile(
+      this.state.players[0].x,
+      this.state.players[0].y
+    );
+    const p2Tile = localPixelToTile(
+      this.state.players[1].x,
+      this.state.players[1].y
+    );
+    this.state.convergenceDistance = tileManhattanDistance(p1Tile, p2Tile);
+    return this.state;
   }
 
   public setLobbyConfig(config: Partial<LobbyConfig>): void {
@@ -369,6 +451,8 @@ export class GameEngine implements IGameEngine {
     }
 
     // Check if either player shifted into a colliding wall tile in their new world
+    const p2BeforeShiftX = this.state.players[1].x;
+    const p2BeforeShiftY = this.state.players[1].y;
     for (const player of this.state.players) {
       if (!player.isAlive) continue;
       const newWorld = getWorldForSide(player.side, this.state.evilOnLeft);
@@ -391,6 +475,13 @@ export class GameEngine implements IGameEngine {
           player.y = freeTile.y * TILE_SIZE_PX;
         }
       }
+    }
+    if (
+      this.state.players[1].x !== p2BeforeShiftX ||
+      this.state.players[1].y !== p2BeforeShiftY
+    ) {
+      this.lastP2ForcedTeleportTick = this.state.tick;
+      this.pendingClientP2Sync = null;
     }
   }
 
@@ -514,12 +605,27 @@ export class GameEngine implements IGameEngine {
       return this.state;
     }
 
-    // 1. Process dimension shift requests / confirmations
-    this.handleShiftInput(dtMs, p1Input, p2Input);
-
-    // 2. Update players and item interactions
+    // 1. Update players and item interactions (so pre-shift clientSync coordinates are applied before shift hazard checks)
+    const p2Sync = this.pendingClientP2Sync;
+    this.pendingClientP2Sync = null;
     updateSinglePlayer(this.state, 0, dtMs, p1Input, this.p1Seq);
-    updateSinglePlayer(this.state, 1, dtMs, p2Input, this.p2Seq);
+    updateSinglePlayer(
+      this.state,
+      1,
+      dtMs,
+      p2Input,
+      this.p2Seq,
+      p2Sync,
+      this.hasClientPlayerSync
+    );
+
+    // 2. Process dimension shift requests / confirmations
+    if (this.state.phase === 'playing') {
+      this.handleShiftInput(dtMs, p1Input, p2Input);
+    }
+
+    const p2BeforeHazardsX = this.state.players[1].x;
+    const p2BeforeHazardsY = this.state.players[1].y;
 
     // 3. Update world objects, puzzles, fires, and doors
     if (this.state.phase === 'playing') {
@@ -535,6 +641,14 @@ export class GameEngine implements IGameEngine {
     // 4. Update monsters (Blobby, EvilLamp) and DimensionTears
     if (this.state.phase === 'playing') {
       updateMonstersAndTears(this.state, dtMs, this.rng);
+    }
+
+    if (
+      this.state.players[1].x !== p2BeforeHazardsX ||
+      this.state.players[1].y !== p2BeforeHazardsY
+    ) {
+      this.lastP2ForcedTeleportTick = this.state.tick;
+      this.pendingClientP2Sync = null;
     }
 
     // 5. Update convergence distance & RNG state

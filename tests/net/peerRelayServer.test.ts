@@ -88,6 +88,26 @@ describe('PeerRelayServer & Same-Origin Relay Integration', () => {
       secure: true,
     });
 
+    // Static hosting platforms without Node WebSocket upgrade support must return null
+    // so PeerJS connects directly to its cloud signaling server instead of failing with
+    // "Lost connection to server." on /shift-peerjs/peerjs.
+    for (const staticHost of [
+      'shift-game-v2.web.app',
+      'shift-game-v2.firebaseapp.com',
+      'user.github.io',
+      'shift-game.pages.dev',
+      'shift-game.vercel.app',
+      'shift-game.netlify.app',
+    ]) {
+      expect(
+        buildDefaultPeerServerOptions({
+          protocol: 'https:',
+          hostname: staticHost,
+          port: '',
+        })
+      ).toBeNull();
+    }
+
     const nullOpts = buildDefaultPeerServerOptions(null);
     expect(nullOpts).toBeNull();
   });

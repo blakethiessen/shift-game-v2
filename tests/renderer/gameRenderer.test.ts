@@ -21,6 +21,7 @@ import {
   computeFloatingInventoryPosition,
   computeFinalRoomConvergenceAlpha,
   computeCameraViewport,
+  computeDimensionVisibleRect,
   computeWindowStageLayout,
   DEFAULT_WINDOW_SCALE_MODE,
   WINDOW_SCALE_MODES,
@@ -1324,6 +1325,130 @@ describe('gameRenderer', () => {
       const textsWithTesting = ctx.fillTextCalls.map((c) => c.text).join(' | ');
       expect(textsWithTesting).toContain('3/5');
       expect(textsWithTesting).toContain('2/3');
+    });
+
+    it('computes visible dimension sub-rectangles and keeps characters & overlays centered in the visible window on non-traditional aspect ratios in "stretch" (SCALE: FULL) mode', () => {
+      // Uncropped in fit/integer/native modes
+      expect(
+        computeDimensionVisibleRect('left', 'fit', 900, 1100)
+      ).toEqual({
+        visX: 0,
+        visY: 0,
+        visW: 500,
+        visH: 650,
+      });
+
+      // Tall portrait window (900x1100) in Local Co-op (1000x650) with 'stretch' (SCALE: FULL):
+      // scale = 1100 / 650 = 1.692307...
+      // visibleBaseW = 900 / scale = 531.818... -> cropX = (1000 - 531.818) / 2 = 234.09...
+      const leftTall = computeDimensionVisibleRect('left', 'stretch', 900, 1100);
+      const rightTall = computeDimensionVisibleRect('right', 'stretch', 900, 1100);
+      expect(leftTall.visX).toBeGreaterThan(230);
+      expect(leftTall.visW).toBeCloseTo(500 - leftTall.visX, 5);
+      expect(leftTall.visY).toBe(0);
+      expect(leftTall.visH).toBe(650);
+
+      expect(rightTall.visX).toBe(0);
+      expect(rightTall.visW).toBeCloseTo(leftTall.visW, 5);
+      expect(rightTall.visY).toBe(0);
+      expect(rightTall.visH).toBe(650);
+
+      // Online single-dimension (500x650) in a tall/narrow window (300x900):
+      const singleTall = computeDimensionVisibleRect('single', 'stretch', 300, 900);
+      expect(singleTall.visX).toBeGreaterThan(0);
+      expect(singleTall.visW).toBeCloseTo(500 - 2 * singleTall.visX, 5);
+
+      // Ultrawide window (2400x800) in Local Co-op (1000x650) with 'stretch':
+      // scale = 2.4 -> visibleBaseH = 800 / 2.4 = 333.33 -> cropY = (650 - 333.33) / 2 = 158.33
+      const leftWide = computeDimensionVisibleRect('left', 'stretch', 2400, 800);
+      expect(leftWide.visX).toBe(0);
+      expect(leftWide.visW).toBe(500);
+      expect(leftWide.visY).toBeCloseTo(158.333, 2);
+      expect(leftWide.visH).toBeCloseTo(333.333, 2);
+
+      // Camera viewport with cropped visibleRect at 2x zoom centers player within visW / zoom
+      const cam2xTall = computeCameraViewport(225, 300, 2.0, leftTall);
+      expect(cam2xTall.viewWidth).toBeCloseTo(leftTall.visW / 2, 4);
+      expect(cam2xTall.viewHeight).toBe(325);
+      // Player center is 237.5 -> camX + viewWidth / 2 should be ~237.5
+      expect(cam2xTall.camX + cam2xTall.viewWidth / 2).toBeCloseTo(237.5, 0);
+
+      // Even at 1x zoom, when visibleRect is cropped (leftTall.visW < 500), camera tracks player horizontally!
+      const cam1xTall = computeCameraViewport(225, 300, 1.0, leftTall);
+      expect(cam1xTall.viewWidth).toBeCloseTo(leftTall.visW, 4);
+      expect(cam1xTall.camX + cam1xTall.viewWidth / 2).toBeCloseTo(237.5, 0);
+
+      // Verify GameRenderer.render translates each dimension view to (offsetX + visX, visY)
+      // and centers popup text within the visible sub-rectangle
+      const { canvas, ctx } = createMockCanvasAndCtx();
+      const offscreenFactory = () => createMockCanvasAndCtx().canvas;
+      const renderer = new GameRenderer(
+        canvas,
+        {} as CanvasImageSource,
+        offscreenFactory
+      );
+
+      const state = createMockGameState({
+        players: [
+          createPlayer(1, {
+            side: 'left',
+            x: 225,
+            y: 300,
+            activePopupText: 'A normal-looking lamp.',
+            interactingObjectId: 'lamp-1',
+            popupFaceDirection: Direction.Down,
+          }),
+          createPlayer(2, {
+            side: 'right',
+            x: 225,
+            y: 300,
+            activePopupText: 'A normal-looking lamp.',
+            interactingObjectId: 'lamp-2',
+            popupFaceDirection: Direction.Down,
+          }),
+        ],
+      });
+
+      const renderOpts: RenderOptions = {
+        localPlayerId: 1,
+        mode: 'local',
+        partnerVisibility: 'strict',
+        lightingEnabled: false,
+        cameraZoom: 2.0,
+        windowScaleMode: 'stretch',
+        viewportWidth: 900,
+        viewportHeight: 1100,
+      };
+      renderer.render(state, renderOpts, 16.67);
+      renderer.render(state, renderOpts, 1000);
+
+      // Left dimension camera should translate to (leftTall.visX, 0) instead of (0, 0)
+      expect(ctx.translate).toHaveBeenCalledWith(leftTall.visX, 0);
+      // Right dimension camera should translate to (500 + rightTall.visX, 0) = (500, 0) and clip to rightTall.visW
+      expect(ctx.rect).toHaveBeenCalledWith(
+        leftTall.visX,
+        0,
+        leftTall.visW,
+        leftTall.visH
+      );
+      expect(ctx.rect).toHaveBeenCalledWith(
+        500,
+        0,
+        rightTall.visW,
+        rightTall.visH
+      );
+
+      // Both players' popup text should be centered near the middle of their visible screen half:
+      // Left visible center X = leftTall.visX + leftTall.visW / 2 (~367)
+      // Right visible center X = 500 + rightTall.visW / 2 (~633)
+      const leftVisibleCenterX = leftTall.visX + leftTall.visW / 2;
+      const rightVisibleCenterX = 500 + rightTall.visW / 2;
+      const popupFillCalls = ctx.fillTextCalls.filter((c) =>
+        c.text.includes('normal-')
+      );
+      expect(popupFillCalls.length).toBeGreaterThanOrEqual(2);
+      expect(popupFillCalls[0].x).toBeCloseTo(leftVisibleCenterX, -1);
+      expect(popupFillCalls[1].x).toBeCloseTo(rightVisibleCenterX, -1);
     });
   });
 });

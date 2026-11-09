@@ -224,6 +224,9 @@ export class ShiftGameApp {
 
     this.boundWindowResize = () => {
       this.updateWindowStageScale();
+      if (this.running) {
+        this.renderCurrentState(0);
+      }
     };
     if (typeof window !== 'undefined') {
       window.addEventListener('resize', this.boundWindowResize);
@@ -396,6 +399,9 @@ export class ShiftGameApp {
     this.saveWindowScaleMode(safeMode);
     this.syncZoomHudDisplay();
     this.updateWindowStageScale();
+    if (this.running) {
+      this.renderCurrentState(0);
+    }
   }
 
   public cycleWindowScaleMode(): WindowScaleMode {
@@ -1415,6 +1421,25 @@ export class ShiftGameApp {
             dtMs
           )
         : null;
+    const isSingleDimensionView =
+      this.running && this.mode === 'online';
+    const baseWidth = isSingleDimensionView
+      ? DIM_WIDTH_PX
+      : FULL_VIEWPORT_WIDTH_PX;
+    const rawViewportWidth =
+      typeof window !== 'undefined' && window.innerWidth > 0
+        ? window.innerWidth
+        : baseWidth;
+    const rawViewportHeight =
+      typeof window !== 'undefined' && window.innerHeight > 0
+        ? window.innerHeight
+        : FULL_VIEWPORT_HEIGHT_PX;
+    const isOnlineMobileOverlay =
+      this.mobileControls?.isEnabled() && isSingleDimensionView;
+    const availHeight = isOnlineMobileOverlay
+      ? Math.max(1, rawViewportHeight - 110)
+      : rawViewportHeight;
+
     try {
       this.renderer.render(
         state,
@@ -1425,6 +1450,9 @@ export class ShiftGameApp {
           lightingEnabled: this.lightingEnabled && !effectiveTestingMode,
           testingMode: effectiveTestingMode,
           cameraZoom: this.cameraZoom,
+          windowScaleMode: this.windowScaleMode,
+          viewportWidth: rawViewportWidth,
+          viewportHeight: availHeight,
           keyStrings,
         },
         dtMs

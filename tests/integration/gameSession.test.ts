@@ -953,12 +953,23 @@ describe('ShiftGameApp End-to-End Integration', () => {
 
     // Cycle to 'stretch' (SCALE: FULL) -> zooms uniformly (5.12x) so width fills 2560px without stretching aspect ratio,
     // while #game-stage clamps to the visible 2560x1440 viewport so HUD overlays remain on-screen
+    const renderSpy = vi.spyOn((app as any).renderer, 'render');
     hudScaleBtn.click();
     expect(app.getWindowScaleMode()).toBe('stretch');
     expect(canvas.style.width).toBe('2560px');
     expect(canvas.style.height).toBe('3328px');
     expect(stage.style.width).toBe('2560px');
     expect(stage.style.height).toBe('1440px');
+    expect(renderSpy).toHaveBeenLastCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        windowScaleMode: 'stretch',
+        viewportWidth: 2560,
+        viewportHeight: 1440,
+      }),
+      expect.any(Number)
+    );
+    renderSpy.mockRestore();
 
     // Cycle to 'native' -> fixed 1x (500x650)
     hudScaleBtn.click();

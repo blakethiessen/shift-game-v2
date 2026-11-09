@@ -197,36 +197,123 @@ export function computeWindowStageLayout(
   };
 }
 
+export interface DimensionVisibleRect {
+  /** Local X offset within the 500px dimension slot where the visible window area starts */
+  visX: number;
+  /** Local Y offset within the 650px dimension slot where the visible window area starts */
+  visY: number;
+  /** Visible width in base canvas pixels within the 500px dimension slot */
+  visW: number;
+  /** Visible height in base canvas pixels within the 650px dimension slot */
+  visH: number;
+}
+
+/**
+ * Computes the sub-rectangle within a 500x650 dimension slot that is actually visible
+ * inside the browser window when the canvas is uniformly scaled to cover ('stretch' / SCALE: FULL).
+ */
+export function computeDimensionVisibleRect(
+  slot: 'left' | 'right' | 'single',
+  scaleMode: WindowScaleMode = DEFAULT_WINDOW_SCALE_MODE,
+  viewportWidth?: number,
+  viewportHeight?: number
+): DimensionVisibleRect {
+  if (
+    scaleMode !== 'stretch' ||
+    typeof viewportWidth !== 'number' ||
+    !Number.isFinite(viewportWidth) ||
+    viewportWidth <= 0 ||
+    typeof viewportHeight !== 'number' ||
+    !Number.isFinite(viewportHeight) ||
+    viewportHeight <= 0
+  ) {
+    return {
+      visX: 0,
+      visY: 0,
+      visW: DIM_WIDTH_PX,
+      visH: DIM_HEIGHT_PX,
+    };
+  }
+
+  const baseWidth = slot === 'single' ? DIM_WIDTH_PX : FULL_VIEWPORT_WIDTH_PX;
+  const baseHeight = FULL_VIEWPORT_HEIGHT_PX;
+  const layout = computeWindowStageLayout(
+    viewportWidth,
+    viewportHeight,
+    baseWidth,
+    baseHeight,
+    'stretch'
+  );
+
+  const visibleBaseW = Math.min(baseWidth, viewportWidth / layout.scaleX);
+  const visibleBaseH = Math.min(baseHeight, viewportHeight / layout.scaleY);
+  const cropX = Math.max(0, (baseWidth - visibleBaseW) / 2);
+  const cropY = Math.max(0, (baseHeight - visibleBaseH) / 2);
+
+  const visY = Math.min(DIM_HEIGHT_PX / 2 - 1, cropY);
+  const visH = Math.max(2, DIM_HEIGHT_PX - 2 * visY);
+
+  if (slot === 'left') {
+    const visX = Math.min(DIM_WIDTH_PX - 2, cropX);
+    const visW = Math.max(2, DIM_WIDTH_PX - visX);
+    return { visX, visY, visW, visH };
+  }
+  if (slot === 'right') {
+    const croppedRight = Math.min(DIM_WIDTH_PX - 2, cropX);
+    const visW = Math.max(2, DIM_WIDTH_PX - croppedRight);
+    return { visX: 0, visY, visW, visH };
+  }
+
+  const visX = Math.min(DIM_WIDTH_PX / 2 - 1, cropX);
+  const visW = Math.max(2, DIM_WIDTH_PX - 2 * visX);
+  return { visX, visY, visW, visH };
+}
+
 export interface CameraViewport {
   zoom: number;
-  /** Width of visible world area in room pixels (DIM_WIDTH_PX / zoom) */
+  /** Width of visible world area in room pixels (visW / zoom) */
   viewWidth: number;
-  /** Height of visible world area in room pixels (DIM_HEIGHT_PX / zoom) */
+  /** Height of visible world area in room pixels (visH / zoom) */
   viewHeight: number;
   /** Top-left world X coordinate of the camera within 0..DIM_WIDTH_PX */
   camX: number;
   /** Top-left world Y coordinate of the camera within 0..DIM_HEIGHT_PX */
   camY: number;
+  /** Optional visible sub-rect inside the 500x650 dimension slot when cropped by SCALE: FULL */
+  visX?: number;
+  visY?: number;
+  visW?: number;
+  visH?: number;
 }
 
 /**
  * Computes the camera viewport rect in room coordinates (0..500 x 0..650)
  * centered on the player and clamped to the room edges so no out-of-bounds void is shown.
+ * When `visibleRect` is cropped (e.g., SCALE: FULL on a non-traditional aspect ratio),
+ * `viewWidth` and `viewHeight` reflect the visible window area so the character stays centered on screen.
  */
 export function computeCameraViewport(
   playerX: number,
   playerY: number,
-  rawZoom: number = DEFAULT_CAMERA_ZOOM
+  rawZoom: number = DEFAULT_CAMERA_ZOOM,
+  visibleRect?: DimensionVisibleRect
 ): CameraViewport {
   const safeZoom =
     typeof rawZoom === 'number' && Number.isFinite(rawZoom)
       ? rawZoom
       : DEFAULT_CAMERA_ZOOM;
   const zoom = Math.max(MIN_CAMERA_ZOOM, Math.min(MAX_CAMERA_ZOOM, safeZoom));
-  const viewWidth = DIM_WIDTH_PX / zoom;
-  const viewHeight = DIM_HEIGHT_PX / zoom;
+  const visX = visibleRect ? visibleRect.visX : 0;
+  const visY = visibleRect ? visibleRect.visY : 0;
+  const visW = visibleRect ? visibleRect.visW : DIM_WIDTH_PX;
+  const visH = visibleRect ? visibleRect.visH : DIM_HEIGHT_PX;
+  const isCropped =
+    visX > 0.01 ||
+    visY > 0.01 ||
+    visW < DIM_WIDTH_PX - 0.01 ||
+    visH < DIM_HEIGHT_PX - 0.01;
 
-  if (zoom <= 1) {
+  if (zoom <= 1 && !isCropped) {
     return {
       zoom: 1,
       viewWidth: DIM_WIDTH_PX,
@@ -235,6 +322,9 @@ export function computeCameraViewport(
       camY: 0,
     };
   }
+
+  const viewWidth = Math.min(DIM_WIDTH_PX, visW / zoom);
+  const viewHeight = Math.min(DIM_HEIGHT_PX, visH / zoom);
 
   const centerX = playerX + TILE_SIZE_PX / 2;
   const centerY = playerY + TILE_SIZE_PX / 2;
@@ -246,6 +336,20 @@ export function computeCameraViewport(
   // Snap camera coordinates to screen-pixel increments to prevent sub-pixel tile seams at fractional zooms
   const camX = Math.round(clampedCamX * zoom) / zoom;
   const camY = Math.round(clampedCamY * zoom) / zoom;
+
+  if (isCropped) {
+    return {
+      zoom,
+      viewWidth,
+      viewHeight,
+      camX,
+      camY,
+      visX,
+      visY,
+      visW,
+      visH,
+    };
+  }
 
   return {
     zoom,
@@ -543,15 +647,30 @@ export class GameRenderer implements IGameRenderer {
       const rightPlayer =
         state.players[1].side === 'right' ? state.players[1] : state.players[0];
 
+      const leftVisibleRect = computeDimensionVisibleRect(
+        'left',
+        options.windowScaleMode,
+        options.viewportWidth,
+        options.viewportHeight
+      );
+      const rightVisibleRect = computeDimensionVisibleRect(
+        'right',
+        options.windowScaleMode,
+        options.viewportWidth,
+        options.viewportHeight
+      );
+
       const leftCamera = computeCameraViewport(
         leftPlayer.x,
         leftPlayer.y,
-        requestedZoom
+        requestedZoom,
+        leftVisibleRect
       );
       const rightCamera = computeCameraViewport(
         rightPlayer.x,
         rightPlayer.y,
-        requestedZoom
+        requestedZoom,
+        rightVisibleRect
       );
 
       this.withDimensionCamera(0, leftCamera, (drawOffsetX) => {
@@ -669,10 +788,17 @@ export class GameRenderer implements IGameRenderer {
           ? requestedZoom + (1 - requestedZoom) * convergenceAlpha
           : requestedZoom;
 
+      const singleVisibleRect = computeDimensionVisibleRect(
+        'single',
+        options.windowScaleMode,
+        options.viewportWidth,
+        options.viewportHeight
+      );
       const localCamera = computeCameraViewport(
         localPlayer.x,
         localPlayer.y,
-        effectiveZoom
+        effectiveZoom,
+        singleVisibleRect
       );
 
       this.withDimensionCamera(0, localCamera, (drawOffsetX) => {
@@ -783,7 +909,17 @@ export class GameRenderer implements IGameRenderer {
     camera: CameraViewport,
     fn: (drawOffsetX: number) => void
   ): void {
-    if (camera.zoom <= 1) {
+    const visX = camera.visX ?? 0;
+    const visY = camera.visY ?? 0;
+    const visW = camera.visW ?? DIM_WIDTH_PX;
+    const visH = camera.visH ?? DIM_HEIGHT_PX;
+    const isCropped =
+      visX > 0.01 ||
+      visY > 0.01 ||
+      visW < DIM_WIDTH_PX - 0.01 ||
+      visH < DIM_HEIGHT_PX - 0.01;
+
+    if (camera.zoom <= 1 && !isCropped) {
       fn(offsetX);
       return;
     }
@@ -793,12 +929,14 @@ export class GameRenderer implements IGameRenderer {
       this.ctx.imageSmoothingEnabled = false;
     }
     this.ctx.beginPath();
-    this.ctx.rect(offsetX, 0, DIM_WIDTH_PX, DIM_HEIGHT_PX);
+    this.ctx.rect(offsetX + visX, visY, visW, visH);
     this.ctx.clip();
-    if (offsetX !== 0) {
-      this.ctx.translate(offsetX, 0);
+    if (offsetX + visX !== 0 || visY !== 0) {
+      this.ctx.translate(offsetX + visX, visY);
     }
-    this.ctx.scale(camera.zoom, camera.zoom);
+    if (camera.zoom !== 1) {
+      this.ctx.scale(camera.zoom, camera.zoom);
+    }
     this.ctx.translate(-camera.camX, -camera.camY);
     fn(0);
     this.ctx.restore();
@@ -1244,20 +1382,50 @@ export class GameRenderer implements IGameRenderer {
       }
 
       const lines = computeTypewriterPopupLines(formatted, tracker.elapsedMs);
+      const visX = camera?.visX ?? 0;
+      const visY = camera?.visY ?? 0;
+      const visW = camera?.visW ?? DIM_WIDTH_PX;
+      const visH = camera?.visH ?? DIM_HEIGHT_PX;
+      const hasCameraTransform = Boolean(
+        camera &&
+          (camera.zoom > 1 ||
+            visX > 0.01 ||
+            visY > 0.01 ||
+            visW < DIM_WIDTH_PX - 0.01 ||
+            visH < DIM_HEIGHT_PX - 0.01)
+      );
       const screenAnchorX =
-        camera && camera.zoom > 1
-          ? (player.x - camera.camX) * camera.zoom
+        hasCameraTransform && camera
+          ? visX +
+            (player.x + TILE_SIZE_PX / 2 - camera.camX) * camera.zoom -
+            TILE_SIZE_PX / 2
           : player.x;
       const screenAnchorY =
-        camera && camera.zoom > 1
-          ? (player.y - camera.camY) * camera.zoom
+        hasCameraTransform && camera
+          ? visY +
+            (player.y + TILE_SIZE_PX / 2 - camera.camY) * camera.zoom -
+            TILE_SIZE_PX / 2
           : player.y;
+      const screenBoundsCamera: CameraViewport | undefined =
+        visX > 0.01 ||
+        visY > 0.01 ||
+        visW < DIM_WIDTH_PX - 0.01 ||
+        visH < DIM_HEIGHT_PX - 0.01
+          ? {
+              zoom: 1,
+              camX: visX,
+              camY: visY,
+              viewWidth: visW,
+              viewHeight: visH,
+            }
+          : undefined;
       const clamped = clampPopupBoxPosition(
         screenAnchorX,
         screenAnchorY,
         player.popupFaceDirection,
         POPUP_BOX_WIDTH_PX,
-        POPUP_DEFAULT_HEIGHT_PX
+        POPUP_DEFAULT_HEIGHT_PX,
+        screenBoundsCamera
       );
 
       this.ctx.save();
@@ -1296,29 +1464,43 @@ export class GameRenderer implements IGameRenderer {
   ): void {
     const worldCx = ping.x + TILE_SIZE_PX / 2;
     const worldCy = ping.y + TILE_SIZE_PX / 2;
+    const visX = camera?.visX ?? 0;
+    const visY = camera?.visY ?? 0;
+    const visW = camera?.visW ?? DIM_WIDTH_PX;
+    const visH = camera?.visH ?? DIM_HEIGHT_PX;
+    const hasCameraTransform = Boolean(
+      camera &&
+        (camera.zoom > 1 ||
+          visX > 0.01 ||
+          visY > 0.01 ||
+          visW < DIM_WIDTH_PX - 0.01 ||
+          visH < DIM_HEIGHT_PX - 0.01)
+    );
     const rawScreenCx =
-      camera && camera.zoom > 1
-        ? (worldCx - camera.camX) * camera.zoom
+      hasCameraTransform && camera
+        ? visX + (worldCx - camera.camX) * camera.zoom
         : worldCx;
     const rawScreenCy =
-      camera && camera.zoom > 1
-        ? (worldCy - camera.camY) * camera.zoom
+      hasCameraTransform && camera
+        ? visY + (worldCy - camera.camY) * camera.zoom
         : worldCy;
     const margin = 28;
+    const minX = visX + margin;
+    const maxX = Math.max(minX, visX + visW - margin);
+    const minY = visY + margin;
+    const maxY = Math.max(minY, visY + visH - margin);
     const isOffCamera =
-      Boolean(camera && camera.zoom > 1) &&
-      (rawScreenCx < margin ||
-        rawScreenCx > DIM_WIDTH_PX - margin ||
-        rawScreenCy < margin ||
-        rawScreenCy > DIM_HEIGHT_PX - margin);
-    const localCx =
-      camera && camera.zoom > 1
-        ? Math.max(margin, Math.min(DIM_WIDTH_PX - margin, rawScreenCx))
-        : rawScreenCx;
-    const localCy =
-      camera && camera.zoom > 1
-        ? Math.max(margin, Math.min(DIM_HEIGHT_PX - margin, rawScreenCy))
-        : rawScreenCy;
+      hasCameraTransform &&
+      (rawScreenCx < minX ||
+        rawScreenCx > maxX ||
+        rawScreenCy < minY ||
+        rawScreenCy > maxY);
+    const localCx = hasCameraTransform
+      ? Math.max(minX, Math.min(maxX, rawScreenCx))
+      : rawScreenCx;
+    const localCy = hasCameraTransform
+      ? Math.max(minY, Math.min(maxY, rawScreenCy))
+      : rawScreenCy;
 
     const cx = offsetX + localCx;
     const cy = localCy;
@@ -1500,25 +1682,41 @@ export class GameRenderer implements IGameRenderer {
         state.players[0].side === 'left' ? state.players[0] : state.players[1];
       const rightPlayer =
         state.players[1].side === 'right' ? state.players[1] : state.players[0];
+      const leftVis = computeDimensionVisibleRect(
+        'left',
+        options.windowScaleMode,
+        options.viewportWidth,
+        options.viewportHeight
+      );
+      const rightVis = computeDimensionVisibleRect(
+        'right',
+        options.windowScaleMode,
+        options.viewportWidth,
+        options.viewportHeight
+      );
+      const leftCenterX = leftVis.visX + leftVis.visW / 2;
+      const rightCenterX = DIM_WIDTH_PX + rightVis.visX + rightVis.visW / 2;
 
       if (state.shiftRequest.requestedBy !== null) {
-        drawShiftBannerAt(DIM_WIDTH_PX / 2, DIM_WIDTH_PX, leftPlayer.id);
-        drawShiftBannerAt(
-          DIM_WIDTH_PX + DIM_WIDTH_PX / 2,
-          DIM_WIDTH_PX,
-          rightPlayer.id
-        );
+        drawShiftBannerAt(leftCenterX, leftVis.visW, leftPlayer.id);
+        drawShiftBannerAt(rightCenterX, rightVis.visW, rightPlayer.id);
       }
       if (rightPlayer.atDoorId !== null) {
-        drawDoorWaitingAt(DIM_WIDTH_PX / 2);
+        drawDoorWaitingAt(leftCenterX);
       }
       if (leftPlayer.atDoorId !== null) {
-        drawDoorWaitingAt(DIM_WIDTH_PX + DIM_WIDTH_PX / 2);
+        drawDoorWaitingAt(rightCenterX);
       }
     } else {
-      const centerX = this.canvas.width / 2;
+      const singleVis = computeDimensionVisibleRect(
+        'single',
+        options.windowScaleMode,
+        options.viewportWidth,
+        options.viewportHeight
+      );
+      const centerX = singleVis.visX + singleVis.visW / 2;
       if (state.shiftRequest.requestedBy !== null) {
-        drawShiftBannerAt(centerX, this.canvas.width, options.localPlayerId);
+        drawShiftBannerAt(centerX, singleVis.visW, options.localPlayerId);
       }
       const partnerPlayer: PlayerState =
         state.players[0].id === options.localPlayerId

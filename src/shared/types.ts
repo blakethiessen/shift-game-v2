@@ -674,6 +674,9 @@ export interface RenderOptions {
   lightingEnabled: boolean;
   testingMode?: boolean;
   cameraZoom?: number;
+  windowScaleMode?: WindowScaleMode;
+  viewportWidth?: number;
+  viewportHeight?: number;
   keyStrings?: {
     p1: PlayerKeyBindings;
     p2: PlayerKeyBindings;

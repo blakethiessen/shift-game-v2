@@ -951,11 +951,14 @@ describe('ShiftGameApp End-to-End Integration', () => {
     expect(canvas.style.width).toBe('1000px');
     expect(canvas.style.height).toBe('1300px');
 
-    // Cycle to 'stretch' -> fills 2560x1440
+    // Cycle to 'stretch' (SCALE: FULL) -> zooms uniformly (5.12x) so width fills 2560px without stretching aspect ratio,
+    // while #game-stage clamps to the visible 2560x1440 viewport so HUD overlays remain on-screen
     hudScaleBtn.click();
     expect(app.getWindowScaleMode()).toBe('stretch');
     expect(canvas.style.width).toBe('2560px');
-    expect(canvas.style.height).toBe('1440px');
+    expect(canvas.style.height).toBe('3328px');
+    expect(stage.style.width).toBe('2560px');
+    expect(stage.style.height).toBe('1440px');
 
     // Cycle to 'native' -> fixed 1x (500x650)
     hudScaleBtn.click();

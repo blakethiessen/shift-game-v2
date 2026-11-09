@@ -527,8 +527,16 @@ export class ShiftGameApp {
         menuEl.style.transform = `scale(${menuLayout.scaleX}, ${menuLayout.scaleY})`;
         menuEl.style.transformOrigin = 'center center';
         if (stageEl) {
-          stageEl.style.width = `${menuLayout.width}px`;
-          stageEl.style.height = `${menuLayout.height}px`;
+          const stageW = Math.min(
+            menuLayout.width,
+            Math.max(1, Math.floor(rawViewportWidth))
+          );
+          const stageH = Math.min(
+            menuLayout.height,
+            Math.max(1, Math.floor(rawViewportHeight))
+          );
+          stageEl.style.width = `${stageW}px`;
+          stageEl.style.height = `${stageH}px`;
           stageEl.setAttribute('data-scale-mode', layout.mode);
         }
       }
@@ -539,8 +547,16 @@ export class ShiftGameApp {
         menuEl.style.transformOrigin = '';
       }
       if (stageEl) {
-        stageEl.style.width = `${layout.width}px`;
-        stageEl.style.height = `${layout.height}px`;
+        const stageW = Math.min(
+          layout.width,
+          Math.max(1, Math.floor(rawViewportWidth))
+        );
+        const stageH = Math.min(
+          layout.height,
+          Math.max(1, Math.floor(availHeight))
+        );
+        stageEl.style.width = `${stageW}px`;
+        stageEl.style.height = `${stageH}px`;
         stageEl.setAttribute('data-scale-mode', layout.mode);
       }
     }

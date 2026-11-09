@@ -264,7 +264,7 @@ describe('MenuSystem', () => {
     expect(
       (container.querySelector('[data-testid="options-window-scale"]') as HTMLButtonElement)
         .textContent
-    ).toBe('Stretch');
+    ).toBe('Full (Fill Window)');
 
     (
       container.querySelector('[data-testid="options-window-scale"]') as HTMLButtonElement

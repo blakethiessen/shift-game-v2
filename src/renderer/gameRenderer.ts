@@ -78,10 +78,11 @@ export const WINDOW_SCALE_MODES: readonly WindowScaleMode[] = [
  *
  * - 'fit' (Default): Proportional fit to window with integer-snapped tile dimensions
  *   (every 25x25 tile is scaled to an exact integer N x N screen pixel square so the
- *   stage fills the window cleanly on 1080p/1440p/4K with zero sub-pixel tile seams).
+ *   stage fits the window cleanly on 1080p/1440p/4K with zero sub-pixel tile seams).
  * - 'integer': Strict whole-canvas integer multiples (1x, 2x, 3x...) when the viewport
  *   is at least 1x, or downscales by integer tile size if the viewport is smaller than 1x.
- * - 'stretch': Fills 100% of both viewport width and height.
+ * - 'stretch' (Full): Uniformly zooms in just enough (`scaleX === scaleY === max(viewW/baseW, viewH/baseH)`)
+ *   so the current window size is completely filled without ever stretching or compressing the aspect ratio.
  * - 'native': Fixed 1x resolution (1000x650 or 500x650).
  */
 export function computeWindowStageLayout(
@@ -128,17 +129,18 @@ export function computeWindowStageLayout(
   }
 
   if (safeMode === 'stretch') {
-    const width = Math.max(1, Math.floor(safeViewW));
-    const height = Math.max(1, Math.floor(safeViewH));
+    const scale = Math.max(safeViewW / safeBaseW, safeViewH / safeBaseH);
+    const width = Math.max(1, Math.round(safeBaseW * scale));
+    const height = Math.max(1, Math.round(safeBaseH * scale));
     return {
       mode: 'stretch',
       baseWidth: safeBaseW,
       baseHeight: safeBaseH,
       width,
       height,
-      scaleX: width / safeBaseW,
-      scaleY: height / safeBaseH,
-      tilePx: Math.max(1, Math.floor(Math.min(width / tilesW, height / tilesH))),
+      scaleX: scale,
+      scaleY: scale,
+      tilePx: Math.max(1, Math.round(TILE_SIZE_PX * scale)),
     };
   }
 

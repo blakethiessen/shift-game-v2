@@ -1156,12 +1156,29 @@ describe('gameRenderer', () => {
       expect(intSub1x.tilePx).toBe(20);
     });
 
-    it('computes full-window dimensions in "stretch" mode and fixed 1x dimensions in "native" mode', () => {
-      const stretched = computeWindowStageLayout(1920, 1080, 1000, 650, 'stretch');
-      expect(stretched.width).toBe(1920);
-      expect(stretched.height).toBe(1080);
-      expect(stretched.scaleX).toBeCloseTo(1.92, 5);
-      expect(stretched.scaleY).toBeCloseTo(1080 / 650, 5);
+    it('zooms uniformly to fill the window in "stretch" (Full) mode (never stretching or compressing aspect ratio) and uses fixed 1x dimensions in "native" mode', () => {
+      // Every WindowScaleMode must preserve 1:1 pixel aspect ratio (scaleX === scaleY)
+      for (const mode of WINDOW_SCALE_MODES) {
+        const localLayout = computeWindowStageLayout(1920, 1080, 1000, 650, mode);
+        expect(localLayout.scaleX).toBeCloseTo(localLayout.scaleY, 6);
+
+        const onlineLayout = computeWindowStageLayout(1920, 1080, 500, 650, mode);
+        expect(onlineLayout.scaleX).toBeCloseTo(onlineLayout.scaleY, 6);
+      }
+
+      // 1920x1080 with 1000x650 base: max(1920/1000, 1080/650) = max(1.92, 1.6615) = 1.92
+      const fullWide = computeWindowStageLayout(1920, 1080, 1000, 650, 'stretch');
+      expect(fullWide.width).toBe(1920);
+      expect(fullWide.height).toBe(1248);
+      expect(fullWide.scaleX).toBeCloseTo(1.92, 5);
+      expect(fullWide.scaleY).toBeCloseTo(1.92, 5);
+
+      // 1000x1000 with 1000x650 base: max(1000/1000, 1000/650) = 1000/650 = 1.53846
+      const fullTall = computeWindowStageLayout(1000, 1000, 1000, 650, 'stretch');
+      expect(fullTall.width).toBe(Math.round(1000 * (1000 / 650)));
+      expect(fullTall.height).toBe(1000);
+      expect(fullTall.scaleX).toBeCloseTo(1000 / 650, 5);
+      expect(fullTall.scaleY).toBeCloseTo(1000 / 650, 5);
 
       const nativeLayout = computeWindowStageLayout(2560, 1440, 500, 650, 'native');
       expect(nativeLayout).toEqual({

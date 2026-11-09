@@ -1251,7 +1251,7 @@ export class MenuSystem {
         case 'integer':
           return 'Integer (1x/2x/3x)';
         case 'stretch':
-          return 'Stretch';
+          return 'Full (Fill Window)';
         case 'native':
           return 'Original (1x)';
       }

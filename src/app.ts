@@ -104,7 +104,11 @@ export class ShiftGameApp {
   private zoomHudSliderEl: HTMLInputElement | null = null;
   private zoomHudValueEl: HTMLButtonElement | null = null;
   private zoomHudScaleBtnEl: HTMLButtonElement | null = null;
+  private zoomShowBtnEl: HTMLButtonElement | null = null;
+  private zoomHudHidden = false;
   private controlsHudEl: HTMLElement | null = null;
+  private controlsShowBtnEl: HTMLButtonElement | null = null;
+  private controlsHudHidden = false;
 
   private accumulatorMs = 0;
   private lastFrameTimestamp = 0;
@@ -715,11 +719,59 @@ export class ShiftGameApp {
     });
     bar.appendChild(scaleBtn);
 
+    const hideZoomBtn = document.createElement('button');
+    hideZoomBtn.type = 'button';
+    hideZoomBtn.className = 'zoom-hud-btn zoom-hud-hide-btn';
+    hideZoomBtn.setAttribute('data-testid', 'hud-zoom-hide');
+    hideZoomBtn.setAttribute('title', 'Hide Zoom Overlay');
+    hideZoomBtn.setAttribute('aria-label', 'Hide Zoom Overlay');
+    hideZoomBtn.textContent = 'HIDE';
+    hideZoomBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    hideZoomBtn.addEventListener('click', () => {
+      this.setZoomHudHidden(true);
+      hideZoomBtn.blur();
+    });
+    bar.appendChild(hideZoomBtn);
+
+    const showZoomBtn = document.createElement('button');
+    showZoomBtn.type = 'button';
+    showZoomBtn.className =
+      'shift-hud-restore-btn shift-zoom-restore-btn is-hidden';
+    showZoomBtn.setAttribute('data-testid', 'hud-zoom-show');
+    showZoomBtn.setAttribute('title', 'Show Zoom Overlay');
+    showZoomBtn.setAttribute('aria-label', 'Show Zoom Overlay');
+    showZoomBtn.textContent = 'SHOW ZOOM';
+    showZoomBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    showZoomBtn.addEventListener('click', () => {
+      this.setZoomHudHidden(false);
+      showZoomBtn.blur();
+    });
+
     this.container.appendChild(bar);
+    this.container.appendChild(showZoomBtn);
     this.zoomHudEl = bar;
     this.zoomHudSliderEl = slider;
     this.zoomHudValueEl = valueBtn;
     this.zoomHudScaleBtnEl = scaleBtn;
+    this.zoomShowBtnEl = showZoomBtn;
+  }
+
+  public setZoomHudHidden(hidden: boolean): void {
+    this.zoomHudHidden = Boolean(hidden);
+    this.updateZoomHudVisibility();
+  }
+
+  public isZoomHudHidden(): boolean {
+    return this.zoomHudHidden;
+  }
+
+  public setControlsHudHidden(hidden: boolean): void {
+    this.controlsHudHidden = Boolean(hidden);
+    this.updateZoomHudVisibility();
+  }
+
+  public isControlsHudHidden(): boolean {
+    return this.controlsHudHidden;
   }
 
   private syncZoomHudDisplay(): void {
@@ -743,13 +795,31 @@ export class ShiftGameApp {
       state.phase !== 'gameOver' &&
       state.phase !== 'victory';
     if (this.zoomHudEl) {
-      this.zoomHudEl.classList.toggle('is-hidden', !inActivePlay);
+      this.zoomHudEl.classList.toggle(
+        'is-hidden',
+        !inActivePlay || this.zoomHudHidden
+      );
+    }
+    if (this.zoomShowBtnEl) {
+      this.zoomShowBtnEl.classList.toggle(
+        'is-hidden',
+        !inActivePlay || !this.zoomHudHidden
+      );
     }
     if (this.controlsHudEl) {
-      this.controlsHudEl.classList.toggle('is-hidden', !inActivePlay);
+      this.controlsHudEl.classList.toggle(
+        'is-hidden',
+        !inActivePlay || this.controlsHudHidden
+      );
       if (inActivePlay) {
         this.syncControlsHudDisplay();
       }
+    }
+    if (this.controlsShowBtnEl) {
+      this.controlsShowBtnEl.classList.toggle(
+        'is-hidden',
+        !inActivePlay || !this.controlsHudHidden
+      );
     }
   }
 
@@ -759,8 +829,24 @@ export class ShiftGameApp {
     bar.setAttribute('data-testid', 'shift-controls-hud');
     bar.setAttribute('aria-label', 'Game Controls Reference');
 
+    const showControlsBtn = document.createElement('button');
+    showControlsBtn.type = 'button';
+    showControlsBtn.className =
+      'shift-hud-restore-btn shift-controls-restore-btn is-hidden';
+    showControlsBtn.setAttribute('data-testid', 'hud-controls-show');
+    showControlsBtn.setAttribute('title', 'Show Controls Overlay');
+    showControlsBtn.setAttribute('aria-label', 'Show Controls Overlay');
+    showControlsBtn.textContent = 'SHOW CONTROLS';
+    showControlsBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    showControlsBtn.addEventListener('click', () => {
+      this.setControlsHudHidden(false);
+      showControlsBtn.blur();
+    });
+
     this.container.appendChild(bar);
+    this.container.appendChild(showControlsBtn);
     this.controlsHudEl = bar;
+    this.controlsShowBtnEl = showControlsBtn;
     this.syncControlsHudDisplay();
   }
 
@@ -866,6 +952,20 @@ export class ShiftGameApp {
         makeGroup('P2', 'controls-hud-p2', 'p2', p2Entries)
       );
     }
+
+    const hideControlsBtn = document.createElement('button');
+    hideControlsBtn.type = 'button';
+    hideControlsBtn.className = 'controls-hud-hide-btn';
+    hideControlsBtn.setAttribute('data-testid', 'hud-controls-hide');
+    hideControlsBtn.setAttribute('title', 'Hide Controls Overlay');
+    hideControlsBtn.setAttribute('aria-label', 'Hide Controls Overlay');
+    hideControlsBtn.textContent = 'HIDE';
+    hideControlsBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    hideControlsBtn.addEventListener('click', () => {
+      this.setControlsHudHidden(true);
+      hideControlsBtn.blur();
+    });
+    innerFrame.appendChild(hideControlsBtn);
 
     this.controlsHudEl.appendChild(innerFrame);
   }
@@ -1352,7 +1452,9 @@ export class ShiftGameApp {
       window.removeEventListener('resize', this.boundWindowResize);
     }
     this.zoomHudEl?.remove();
+    this.zoomShowBtnEl?.remove();
     this.controlsHudEl?.remove();
+    this.controlsShowBtnEl?.remove();
     this.mobileControls.destroy();
     this.inputManager.destroy();
     this.menuSystem.destroy();

@@ -792,6 +792,67 @@ input[type="range"].retro-slider::-moz-range-thumb {
   color: #ffffff;
 }
 
+.controls-hud-hide-btn {
+  background: #121a1e;
+  border: 1.5px solid #35494f;
+  color: var(--color-muted);
+  font-family: var(--font-retro);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 1.1;
+  white-space: nowrap;
+  pointer-events: auto;
+  margin-left: 4px;
+}
+
+.controls-hud-hide-btn:hover,
+.zoom-hud-hide-btn:hover {
+  border-color: var(--color-highlight);
+  color: var(--color-highlight);
+}
+
+.shift-hud-restore-btn {
+  position: absolute;
+  z-index: 25;
+  background: rgba(5, 7, 8, 0.85);
+  border: 1.5px solid #35494F;
+  color: var(--color-muted);
+  font-family: var(--font-retro);
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+  pointer-events: auto;
+  user-select: none;
+  opacity: 0.72;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.shift-hud-restore-btn:hover {
+  opacity: 1;
+  border-color: var(--color-highlight);
+  color: var(--color-highlight);
+}
+
+.shift-hud-restore-btn.is-hidden {
+  display: none !important;
+}
+
+.shift-zoom-restore-btn {
+  top: 6px;
+  right: 8px;
+}
+
+.shift-controls-restore-btn {
+  bottom: 6px;
+  right: 8px;
+}
+
+#ui-overlay:has(.shift-mobile-controls:not(.is-hidden)) .shift-hud-restore-btn {
+  display: none !important;
+}
+
 /* ============================================================================
    Mobile Touch Controls & Head-to-Head Local Co-op Layout
    ============================================================================ */

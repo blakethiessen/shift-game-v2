@@ -1043,6 +1043,52 @@ describe('ShiftGameApp End-to-End Integration', () => {
     app.getMenuSystem()['inputManager'].updateBinding('p2', 'UseItem', 'KeyK');
     expect(controlsHud.textContent).toContain('K');
 
+    // Test hiding and showing the Controls overlay and Zoom overlay via their HUD buttons
+    const zoomHud = container.querySelector(
+      '[data-testid="shift-zoom-hud"]'
+    ) as HTMLElement;
+    const hideZoomBtn = container.querySelector(
+      '[data-testid="hud-zoom-hide"]'
+    ) as HTMLButtonElement;
+    const showZoomBtn = container.querySelector(
+      '[data-testid="hud-zoom-show"]'
+    ) as HTMLButtonElement;
+    const hideControlsBtn = container.querySelector(
+      '[data-testid="hud-controls-hide"]'
+    ) as HTMLButtonElement;
+    const showControlsBtn = container.querySelector(
+      '[data-testid="hud-controls-show"]'
+    ) as HTMLButtonElement;
+
+    expect(hideZoomBtn).toBeTruthy();
+    expect(showZoomBtn).toBeTruthy();
+    expect(hideControlsBtn).toBeTruthy();
+    expect(showControlsBtn).toBeTruthy();
+    expect(zoomHud.classList.contains('is-hidden')).toBe(false);
+    expect(showZoomBtn.classList.contains('is-hidden')).toBe(true);
+    expect(controlsHud.classList.contains('is-hidden')).toBe(false);
+    expect(showControlsBtn.classList.contains('is-hidden')).toBe(true);
+
+    // Click Hide on Zoom overlay -> hides Zoom HUD and reveals Show Zoom button
+    hideZoomBtn.click();
+    expect(zoomHud.classList.contains('is-hidden')).toBe(true);
+    expect(showZoomBtn.classList.contains('is-hidden')).toBe(false);
+
+    // Click Show Zoom button -> restores Zoom HUD and hides Show Zoom button
+    showZoomBtn.click();
+    expect(zoomHud.classList.contains('is-hidden')).toBe(false);
+    expect(showZoomBtn.classList.contains('is-hidden')).toBe(true);
+
+    // Click Hide on Controls overlay -> hides Controls HUD and reveals Show Controls button
+    hideControlsBtn.click();
+    expect(controlsHud.classList.contains('is-hidden')).toBe(true);
+    expect(showControlsBtn.classList.contains('is-hidden')).toBe(false);
+
+    // Click Show Controls button -> restores Controls HUD and hides Show Controls button
+    showControlsBtn.click();
+    expect(controlsHud.classList.contains('is-hidden')).toBe(false);
+    expect(showControlsBtn.classList.contains('is-hidden')).toBe(true);
+
     // Place a Blobby and a Dimension Tear in spawnRoom and verify their HP is drawn in Testing Mode
     const state = app.getState();
     state.room.tears.push({

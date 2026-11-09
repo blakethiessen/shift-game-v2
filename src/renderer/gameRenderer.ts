@@ -52,6 +52,9 @@ import { LightingRenderer } from './lightingRenderer';
 export const POPUP_BOX_WIDTH_PX = 120;
 export const POPUP_DEFAULT_HEIGHT_PX = 64;
 export const POPUP_VIEWPORT_MARGIN_PX = 4;
+export const POPUP_MAX_CHARS_PER_LINE = 14;
+export const POPUP_MAX_VISIBLE_LINES = 4;
+export const POPUP_TYPEWRITER_MS_PER_CHAR = 40;
 
 export const MIN_CAMERA_ZOOM = 1.0;
 export const MAX_CAMERA_ZOOM = 4.0;
@@ -327,7 +330,7 @@ export function formatPopupText(
  */
 export function wrapPopupLines(
   text: string,
-  maxCharsPerLine: number = 16
+  maxCharsPerLine: number = POPUP_MAX_CHARS_PER_LINE
 ): string[] {
   const words = text.trim().split(/\s+/);
   const lines: string[] = [];
@@ -347,6 +350,44 @@ export function wrapPopupLines(
     lines.push(current);
   }
   return lines;
+}
+
+/**
+ * Computes the currently visible lines of popup text using the original
+ * Crafty.js TextPrinter typewriter + 4-line scrolling window behavior.
+ */
+export function computeTypewriterPopupLines(
+  text: string,
+  elapsedMs: number,
+  maxCharsPerLine: number = POPUP_MAX_CHARS_PER_LINE,
+  maxVisibleLines: number = POPUP_MAX_VISIBLE_LINES,
+  msPerChar: number = POPUP_TYPEWRITER_MS_PER_CHAR
+): string[] {
+  const lines = wrapPopupLines(text, maxCharsPerLine);
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const safeElapsed = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0;
+  const safeMsPerChar =
+    Number.isFinite(msPerChar) && msPerChar > 0
+      ? msPerChar
+      : POPUP_TYPEWRITER_MS_PER_CHAR;
+  let charsToReveal = Math.floor(safeElapsed / safeMsPerChar) + 1;
+
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const line = lines[lineIdx];
+    if (charsToReveal <= line.length) {
+      const startLine = Math.max(0, lineIdx - (maxVisibleLines - 1));
+      const completedVisible = lines.slice(startLine, lineIdx);
+      completedVisible.push(line.slice(0, charsToReveal));
+      return completedVisible;
+    }
+    charsToReveal -= line.length;
+  }
+
+  const startLine = Math.max(0, lines.length - maxVisibleLines);
+  return lines.slice(startLine);
 }
 
 /**
@@ -406,6 +447,13 @@ export class GameRenderer implements IGameRenderer {
   private elapsedTimeMs = 0;
   private lastProcessedEventId = 0;
   private activeFlash: ActiveFlash | null = null;
+  private readonly popupTypewriterState: Record<
+    PlayerId,
+    { text: string | null; objectId: string | null; elapsedMs: number }
+  > = {
+    1: { text: null, objectId: null, elapsedMs: 0 },
+    2: { text: null, objectId: null, elapsedMs: 0 },
+  };
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -541,7 +589,8 @@ export class GameRenderer implements IGameRenderer {
         rightPlayer,
         0,
         options,
-        leftCamera
+        leftCamera,
+        dtMs
       );
 
       this.withDimensionCamera(DIM_WIDTH_PX, rightCamera, (drawOffsetX) => {
@@ -580,7 +629,8 @@ export class GameRenderer implements IGameRenderer {
         leftPlayer,
         DIM_WIDTH_PX,
         options,
-        rightCamera
+        rightCamera,
+        dtMs
       );
 
       // Subtle center divider line
@@ -682,7 +732,8 @@ export class GameRenderer implements IGameRenderer {
         partnerPlayer,
         0,
         options,
-        localCamera
+        localCamera,
+        dtMs
       );
     }
 
@@ -1169,16 +1220,28 @@ export class GameRenderer implements IGameRenderer {
     partner: PlayerState,
     offsetX: number,
     options: RenderOptions,
-    camera?: CameraViewport
+    camera?: CameraViewport,
+    dtMs: number = 0
   ): void {
-    // 1. Clamped Popup Text Box (120px wide in screen space, strictly clamped to 0..500 x 0..650)
+    // 1. Typewriter Scrolling Popup Text (120px wide in screen space, up to 4 visible lines, no bounding box)
+    const tracker = this.popupTypewriterState[player.id];
     if (player.activePopupText) {
       const formatted = formatPopupText(
         player.activePopupText,
         options.keyStrings
       );
-      const lines = wrapPopupLines(formatted, 16);
-      const boxHeight = Math.max(28, lines.length * 14 + 10);
+      if (
+        tracker.text !== formatted ||
+        tracker.objectId !== player.interactingObjectId
+      ) {
+        tracker.text = formatted;
+        tracker.objectId = player.interactingObjectId;
+        tracker.elapsedMs = 0;
+      } else {
+        tracker.elapsedMs += Math.max(0, dtMs);
+      }
+
+      const lines = computeTypewriterPopupLines(formatted, tracker.elapsedMs);
       const screenAnchorX =
         camera && camera.zoom > 1
           ? (player.x - camera.camX) * camera.zoom
@@ -1192,25 +1255,10 @@ export class GameRenderer implements IGameRenderer {
         screenAnchorY,
         player.popupFaceDirection,
         POPUP_BOX_WIDTH_PX,
-        boxHeight
+        POPUP_DEFAULT_HEIGHT_PX
       );
 
       this.ctx.save();
-      this.ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
-      this.ctx.fillRect(
-        offsetX + clamped.x,
-        clamped.y,
-        POPUP_BOX_WIDTH_PX,
-        boxHeight
-      );
-      this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-      this.ctx.lineWidth = 1;
-      this.ctx.strokeRect(
-        offsetX + clamped.x,
-        clamped.y,
-        POPUP_BOX_WIDTH_PX,
-        boxHeight
-      );
       this.ctx.fillStyle = '#FFFFFF';
       this.ctx.font = '10pt Courier, monospace';
       this.ctx.textAlign = 'center';
@@ -1223,6 +1271,10 @@ export class GameRenderer implements IGameRenderer {
         );
       });
       this.ctx.restore();
+    } else if (tracker.text !== null || tracker.objectId !== null) {
+      tracker.text = null;
+      tracker.objectId = null;
+      tracker.elapsedMs = 0;
     }
 
     // 2. Quick Ping Ripples (projected into screen space with off-camera edge indicator)

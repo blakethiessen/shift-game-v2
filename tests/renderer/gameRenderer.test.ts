@@ -14,6 +14,10 @@ import {
 import {
   clampPopupBoxPosition,
   formatPopupText,
+  computeTypewriterPopupLines,
+  POPUP_MAX_CHARS_PER_LINE,
+  POPUP_MAX_VISIBLE_LINES,
+  POPUP_TYPEWRITER_MS_PER_CHAR,
   computeFloatingInventoryPosition,
   computeFinalRoomConvergenceAlpha,
   computeCameraViewport,
@@ -260,6 +264,156 @@ describe('gameRenderer', () => {
       expect(formatted).toContain(']');
       expect(formatted).toContain('Q');
       expect(formatted).toContain("'");
+    });
+
+    it('types popup text character-by-character and scrolls a 4-line window like the original Crafty.js TextPrinter without a bounding box', () => {
+      expect(POPUP_MAX_CHARS_PER_LINE).toBe(14);
+      expect(POPUP_MAX_VISIBLE_LINES).toBe(4);
+      expect(POPUP_TYPEWRITER_MS_PER_CHAR).toBeGreaterThan(0);
+
+      const bookText =
+        'This chest is locked! To open it, activate all of the pressure plates and levers in the room.';
+
+      // At elapsedMs = 0, starts typing the very first character on line 1
+      const atStart = computeTypewriterPopupLines(bookText, 0);
+      expect(atStart).toEqual(['T']);
+
+      // After 5 character intervals, shows first 6 characters of line 1 ("This c")
+      const at5Chars = computeTypewriterPopupLines(
+        bookText,
+        5 * POPUP_TYPEWRITER_MS_PER_CHAR
+      );
+      expect(at5Chars).toEqual(['This c']);
+
+      // Partway through line 3 -> shows lines 1, 2, and partial line 3 (<= 4 lines)
+      const midTyping = computeTypewriterPopupLines(
+        bookText,
+        28 * POPUP_TYPEWRITER_MS_PER_CHAR
+      );
+      expect(midTyping.length).toBe(3);
+      expect(midTyping[0]).toBe('This chest is');
+      expect(midTyping[1]).toBe('locked! To');
+
+      // Once typing progresses past line 4 into line 5+, window scrolls so at most 4 lines are shown
+      // and line 1 ('This chest is') has scrolled off the top
+      const atEnd = computeTypewriterPopupLines(
+        bookText,
+        500 * POPUP_TYPEWRITER_MS_PER_CHAR
+      );
+      expect(atEnd.length).toBe(4);
+      expect(atEnd).not.toContain('This chest is');
+      expect(atEnd[atEnd.length - 2]).toBe('levers in the');
+      expect(atEnd[atEnd.length - 1]).toBe('room.');
+
+      // Verify GameRenderer renders typewriter popup text with NO bounding box (no fillRect / strokeRect)
+      // and advances/resets typewriter state across frames
+      const { canvas, ctx } = createMockCanvasAndCtx();
+      const offscreenFactory = () => createMockCanvasAndCtx().canvas;
+      const renderer = new GameRenderer(
+        canvas,
+        {} as CanvasImageSource,
+        offscreenFactory
+      );
+
+      const stateWithPopup = createMockGameState({
+        players: [
+          createPlayer(1, {
+            x: 225,
+            y: 300,
+            interactingObjectId: 'book-1',
+            activePopupText: bookText,
+            popupFaceDirection: Direction.Up,
+          }),
+          createPlayer(2),
+        ],
+      });
+
+      ctx.fillRect.mockClear();
+      ctx.strokeRect.mockClear();
+      ctx.fillTextCalls.length = 0;
+
+      // Frame 1 (dtMs = 0): starts typing first char, zero fillRect/strokeRect calls (no bounding box)
+      renderer.render(
+        stateWithPopup,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        0
+      );
+      expect(ctx.fillRect).not.toHaveBeenCalled();
+      expect(ctx.strokeRect).not.toHaveBeenCalled();
+      expect(ctx.fillTextCalls.map((c) => c.text)).toEqual(['T']);
+
+      // Advance by 10 chars worth of time -> reveals more text on line 1
+      ctx.fillTextCalls.length = 0;
+      renderer.render(
+        stateWithPopup,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        10 * POPUP_TYPEWRITER_MS_PER_CHAR
+      );
+      expect(ctx.fillRect).not.toHaveBeenCalled();
+      expect(ctx.strokeRect).not.toHaveBeenCalled();
+      expect(ctx.fillTextCalls[0].text).toBe('This chest ');
+
+      // Advance past the end of the text -> scrolls to final 4 lines
+      ctx.fillTextCalls.length = 0;
+      renderer.render(
+        stateWithPopup,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        500 * POPUP_TYPEWRITER_MS_PER_CHAR
+      );
+      expect(ctx.fillTextCalls.length).toBe(4);
+      expect(ctx.fillTextCalls[2].text).toBe('levers in the');
+      expect(ctx.fillTextCalls[3].text).toBe('room.');
+
+      // Moving away (activePopupText: null) and re-approaching resets the typewriter back to the start
+      const stateNoPopup = createMockGameState({
+        players: [
+          createPlayer(1, {
+            x: 225,
+            y: 350,
+            interactingObjectId: null,
+            activePopupText: null,
+          }),
+          createPlayer(2),
+        ],
+      });
+      renderer.render(
+        stateNoPopup,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+
+      ctx.fillTextCalls.length = 0;
+      renderer.render(
+        stateWithPopup,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        0
+      );
+      expect(ctx.fillTextCalls.map((c) => c.text)).toEqual(['T']);
     });
 
     it('renders floating inventory icon at y - 25, or y + 25 when player.y < 25', () => {

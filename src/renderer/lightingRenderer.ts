@@ -111,7 +111,7 @@ export function getFireHaloParams(
     radius: 22,
     tintColor: 'rgba(59, 130, 246, 0.55)',
     tintAlpha: 0.35,
-    punchLightCircle: false,
+    punchLightCircle: true,
   };
 }
 
@@ -290,12 +290,13 @@ export class LightingRenderer {
       }
     }
 
-    // 4. Fire entities (pulsing 72..80px orange halo when on, faint 22px blue ember when off)
+    // 4. Fire punch cutouts first; colored tints draw after step 5 so player halo never erases fire glow
+    const fireHalos: Array<{ cx: number; cy: number; halo: FireHaloParams }> = [];
     for (const fire of worldGrid.fires) {
       const cx = fire.x + TILE_SIZE_PX / 2;
       const cy = fire.y + TILE_SIZE_PX / 2;
       const halo = getFireHaloParams(fire, opts.timeMs);
-      this.drawLightTint(ctx, cx, cy, halo.radius, halo.tintAlpha, halo.tintColor);
+      fireHalos.push({ cx, cy, halo });
       if (halo.punchLightCircle) {
         this.punchLightCircle(ctx, cx, cy, halo.radius);
       }
@@ -317,6 +318,11 @@ export class LightingRenderer {
       this.punchLightCone(ctx, px, py, beamDir, FLASHLIGHT_2_CONE_LENGTH_PX);
     } else if (opts.player.flashlightMode === 'lantern') {
       this.punchLightCircle(ctx, px, py, LANTERN_LIGHT_RADIUS_PX);
+    }
+
+    // 5b. Apply fire glow tints after all destination-out punches
+    for (const { cx, cy, halo } of fireHalos) {
+      this.drawLightTint(ctx, cx, cy, halo.radius, halo.tintAlpha, halo.tintColor);
     }
 
     // 6. Composite onto target canvas at (offsetX, 0) with smooth radial interpolation

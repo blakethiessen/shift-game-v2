@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { GameEngine } from '../../src/core/gameEngine';
 import { RAW_LEVELS } from '../../src/core/levelData';
 import {
   parseRoom,
@@ -208,5 +209,46 @@ describe('levelParser', () => {
     // Ensure persistence helper returns valid structure
     const emptyPersist = createEmptyRoomPersistence();
     expect(emptyPersist.visited).toBe(false);
+  });
+
+  it('keeps room clear on re-entry when all Blobbies were killed (persistence.visited && blobbies.length === 0)', () => {
+    const engine = new GameEngine(42);
+    engine.loadRoom('monsterIntro');
+    let state = engine.getState();
+    expect(state.room.worlds.dangerous.blobbies.length).toBeGreaterThan(0);
+
+    // Wipe out all blobbies in the room and exit
+    state.room.worlds.neutral.blobbies = [];
+    state.room.worlds.dangerous.blobbies = [];
+    engine.loadRoom('chestIntro');
+    engine.loadRoom('monsterIntro');
+
+    state = engine.getState();
+    expect(state.room.worlds.neutral.blobbies.length).toBe(0);
+    expect(state.room.worlds.dangerous.blobbies.length).toBe(0);
+  });
+
+  it('preserves hasSpread: false on stage-4 tears across room exit and re-entry', () => {
+    const engine = new GameEngine(42);
+    engine.loadRoom('chestIntro');
+    let state = engine.getState();
+    state.room.tears = [
+      {
+        id: 'stage4-unspread',
+        x: 200,
+        y: 300,
+        angle: 9, // Direction.Horizontal
+        stage: 4,
+        growthTimerMs: 1500,
+        hasSpread: false,
+      },
+    ];
+
+    engine.loadRoom('keyIntro');
+    engine.loadRoom('chestIntro');
+    state = engine.getState();
+    expect(state.room.tears.length).toBe(1);
+    expect(state.room.tears[0].stage).toBe(4);
+    expect(state.room.tears[0].hasSpread).toBe(false);
   });
 });

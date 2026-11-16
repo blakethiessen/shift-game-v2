@@ -23,6 +23,8 @@ import {
   DEFAULT_JOIN_TIMEOUT_MS,
   buildIceServers,
   IPeerLike,
+  IPeerSocketLike,
+  PeerFactory,
   IDataConnectionLike,
 } from '../../src/net/peerManager';
 import {
@@ -1780,5 +1782,581 @@ describe('PeerManager P2P Handshake, Sync, Ping/Pong RTT & Disconnect (peerManag
 
     host.disconnect();
     client.disconnect();
+  });
+
+  it('rejects deeply malformed StatePackets, strips __proto__ keys, preserves non-template entities, and clamps sequence jumps', () => {
+    // C-06: Shallow players / room must fail validation
+    expect(
+      isValidNetPacket({
+        type: 'state',
+        hostTick: 1,
+        lastProcessedClientTick: 0,
+        state: {
+          tick: 1,
+          roomName: 'spawnRoom',
+          players: [null, null],
+          room: {},
+          events: [],
+        },
+      })
+    ).toBe(false);
+
+    // Non-template dynamically added world entity retains full coordinates after compaction roundtrip
+    const engine = new GameEngine(42);
+    const st = structuredClone(engine.getState());
+    st.room.worlds.neutral.fires.push({
+      id: 'dyn_fire_1',
+      variant: 1,
+      world: 'neutral',
+      x: 175,
+      y: 225,
+      gid: 3930,
+      isOn: true,
+      damageTimerMs: 0,
+    });
+    const raw = serializePacket({
+      type: 'state',
+      hostTick: st.tick,
+      lastProcessedClientTick: 0,
+      state: st,
+    });
+    const restored = deserializePacket(raw) as StatePacket | null;
+    expect(restored).not.toBeNull();
+    const dynFire = restored!.state.room.worlds.neutral.fires.find(
+      (f) => f.id === 'dyn_fire_1'
+    );
+    expect(dynFire).toBeDefined();
+    expect(dynFire!.x).toBe(175);
+    expect(dynFire!.y).toBe(225);
+
+    // Adversarial __proto__ key in JSON persistence does not assign own/proto pollution
+    const parsedProto = deserializePacket(
+      raw.replace(
+        '"persistence":{',
+        '"persistence":{"__proto__":{"polluted":true},'
+      )
+    ) as StatePacket | null;
+    expect(parsedProto).not.toBeNull();
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        parsedProto!.state.persistence,
+        '__proto__'
+      )
+    ).toBe(false);
+
+    // M-06: Clamp sequence jumps in InputSequenceTracker
+    const tracker = new InputSequenceTracker();
+    tracker.pushInput({
+      ...createDefaultPlayerInput(),
+      inventoryDropSeq: 1_000_000,
+    });
+    for (let i = 0; i < 20; i++) {
+      tracker.consumeForTick();
+    }
+    expect(tracker.getDeliveredInput().inventoryDropSeq).toBeLessThanOrEqual(8);
+  });
+
+  it('bypasses 50ms cloud relay delay on useItemSeq and delivers in-flight lobbySync during asymmetric WebRTC upgrade', async () => {
+    vi.useFakeTimers();
+    const sockets = new Map<string, Set<(raw: unknown) => void>>();
+    let clientWebRtcTriggerOpen: (() => void) | null = null;
+
+    const makeFactory = (isCloudBroker: boolean): PeerFactory => {
+      return (id) => {
+        const myId =
+          id ??
+          `client-${Math.random().toString(36).slice(2, 7)}`;
+        const listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
+        const sockListeners = new Set<(raw: unknown) => void>();
+        sockets.set(myId, sockListeners);
+
+        const socket: IPeerSocketLike = {
+          send(rawData: unknown) {
+            const msg = JSON.parse(JSON.stringify(rawData)) as {
+              type?: string;
+              dst?: string;
+              payload?: unknown;
+            };
+            if (!msg?.dst) return;
+            const targetSet = sockets.get(msg.dst);
+            if (!targetSet) return;
+            queueMicrotask(() => {
+              for (const cb of targetSet) {
+                cb({
+                  type: msg.type ?? 'RELAY',
+                  src: myId,
+                  dst: msg.dst,
+                  payload: msg.payload,
+                });
+              }
+            });
+          },
+          on(ev: string, cb: (data: unknown) => void) {
+            if (ev === 'message') sockListeners.add(cb);
+          },
+        };
+
+        const makeWebRtcConn = (peerId: string): IDataConnectionLike => {
+          const cListeners: Record<string, Array<(...args: unknown[]) => void>> = {};
+          const conn = {
+            peer: peerId,
+            open: false,
+            send: vi.fn(),
+            close: vi.fn(),
+            on(ev: string, cb: (...args: unknown[]) => void) {
+              cListeners[ev] = cListeners[ev] ?? [];
+              cListeners[ev].push(cb);
+            },
+          } as unknown as IDataConnectionLike;
+          if (!myId.startsWith('shift-game-room-')) {
+            clientWebRtcTriggerOpen = () => {
+              (conn as unknown as { open: boolean }).open = true;
+              for (const cb of cListeners['open'] ?? []) cb();
+            };
+          }
+          return conn;
+        };
+
+        queueMicrotask(() => {
+          for (const cb of listeners['open'] ?? []) cb(myId);
+        });
+
+        return {
+          socket,
+          isCloudBroker,
+          destroyed: false,
+          disconnected: false,
+          connect: (target: string) => {
+            const conn = makeWebRtcConn(target);
+            // Simulate host receiving connection
+            return conn;
+          },
+          on: ((ev: string, cb: (...args: unknown[]) => void) => {
+            listeners[ev] = listeners[ev] ?? [];
+            listeners[ev].push(cb);
+          }) as IPeerLike['on'],
+          destroy: vi.fn(),
+        } as unknown as IPeerLike;
+      };
+    };
+
+    const host = new PeerManager({
+      peerFactory: makeFactory(true),
+      relayFallbackDelayMs: 100,
+      pingIntervalMs: 60000,
+    });
+    const client = new PeerManager({
+      peerFactory: makeFactory(true),
+      relayFallbackDelayMs: 100,
+      pingIntervalMs: 60000,
+    });
+
+    const hostReceived: NetPacket[] = [];
+    const clientReceived: NetPacket[] = [];
+    host.onPacket((p) => hostReceived.push(p));
+    client.onPacket((p) => clientReceived.push(p));
+
+    await host.hostRoom('ASY01');
+    const joinP = client.joinRoom('ASY01');
+    await Promise.resolve();
+    vi.advanceTimersByTime(150);
+    await Promise.resolve();
+    await Promise.resolve();
+    await joinP;
+
+    expect(host.isUsingRelay()).toBe(true);
+    expect(client.isUsingRelay()).toBe(true);
+
+    // 1. H-09: Send movement packet, then within 5ms send useItemSeq -> must bypass 50ms coalescing immediately!
+    client.sendPacket({
+      type: 'input',
+      playerId: 2,
+      clientTick: 1,
+      input: { ...createDefaultPlayerInput(), right: true },
+    });
+    await Promise.resolve();
+    vi.advanceTimersByTime(5);
+    client.sendPacket({
+      type: 'input',
+      playerId: 2,
+      clientTick: 2,
+      input: { ...createDefaultPlayerInput(), right: true, useItemSeq: 1 },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      hostReceived.some((p) => p.type === 'input' && p.input.useItemSeq === 1)
+    ).toBe(true);
+
+    // 2. H-06: Client WebRTC channel opens BEFORE Host's, then Host sends lobbySync startGame: true over relay!
+    (clientWebRtcTriggerOpen as (() => void) | null)?.();
+    expect(client.isUsingRelay()).toBe(false);
+
+    host.sendPacket({
+      type: 'lobbySync',
+      lobbyConfig: createDefaultLobbyConfig(),
+      hostReady: true,
+      clientReady: true,
+      startGame: true,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      clientReceived.some((p) => p.type === 'lobbySync' && p.startGame)
+    ).toBe(true);
+
+    host.disconnect();
+    client.disconnect();
+  });
+
+  it('rejects prototype roomName keys, prototype persistence keys, and null compacted entity elements in deserializePacket without throwing', () => {
+    const base = createMinimalGameState({ roomName: 'constructor' });
+    const pkt = JSON.stringify({
+      type: 'state',
+      _cellsCompacted: true,
+      hostTick: 1,
+      lastProcessedClientTick: 0,
+      state: {
+        ...base,
+        persistence: {
+          toString: {
+            visited: true,
+            removedItemCoords: [],
+            addedItems: [],
+            unlockedDoorCoords: [],
+            safePlatesPressedIds: [],
+            safeOpened: false,
+            lamps: [1],
+            blobbies: [],
+            tears: [],
+            chests: {},
+            statue: { hasRedGem: false, hasBlueGem: false },
+          },
+        },
+        room: {
+          ...base.room,
+          worlds: {
+            ...base.room.worlds,
+            neutral: {
+              ...base.room.worlds.neutral,
+              doors: [null],
+            },
+          },
+        },
+      },
+    });
+    expect(() => deserializePacket(pkt)).not.toThrow();
+    expect(deserializePacket(pkt)).toBeNull();
+  });
+
+  it('does not close a still-negotiating WebRTC DataConnection when WS relay fallback activates first', async () => {
+    vi.useFakeTimers();
+    const sockets = new Map<string, Set<(raw: unknown) => void>>();
+    let clientWebRtcClosed = false;
+    let clientWebRtcTriggerOpen: (() => void) | null = null;
+
+    const makeFactory = (): PeerFactory => {
+      return (id) => {
+        const myId = id ?? `client-rtc-${Math.random().toString(36).slice(2, 6)}`;
+        const listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
+        const sockListeners = new Set<(raw: unknown) => void>();
+        sockets.set(myId, sockListeners);
+
+        const socket: IPeerSocketLike = {
+          send(rawData: unknown) {
+            const msg = JSON.parse(JSON.stringify(rawData)) as {
+              type?: string;
+              dst?: string;
+              payload?: unknown;
+            };
+            const targetSet = msg?.dst ? sockets.get(msg.dst) : undefined;
+            if (!targetSet) return;
+            queueMicrotask(() => {
+              for (const cb of targetSet) {
+                cb({
+                  type: msg.type ?? 'RELAY',
+                  src: myId,
+                  dst: msg.dst,
+                  payload: msg.payload,
+                });
+              }
+            });
+          },
+          on(ev: string, cb: (data: unknown) => void) {
+            if (ev === 'message') sockListeners.add(cb);
+          },
+        };
+
+        queueMicrotask(() => {
+          for (const cb of listeners['open'] ?? []) cb(myId);
+        });
+
+        return {
+          id: myId,
+          socket,
+          isCloudBroker: false,
+          destroyed: false,
+          disconnected: false,
+          disconnect: vi.fn(),
+          connect: (target: string) => {
+            const cListeners: Record<string, Array<(...args: unknown[]) => void>> = {};
+            const conn = {
+              peer: target,
+              open: false,
+              send: vi.fn(),
+              close: vi.fn(() => {
+                if (!myId.startsWith('shift-game-room-')) {
+                  clientWebRtcClosed = true;
+                }
+              }),
+              on(ev: string, cb: (...args: unknown[]) => void) {
+                cListeners[ev] = cListeners[ev] ?? [];
+                cListeners[ev].push(cb);
+              },
+            } as unknown as IDataConnectionLike;
+            if (!myId.startsWith('shift-game-room-')) {
+              clientWebRtcTriggerOpen = () => {
+                if (clientWebRtcClosed) return;
+                (conn as unknown as { open: boolean }).open = true;
+                for (const cb of cListeners['open'] ?? []) cb();
+              };
+            }
+            return conn;
+          },
+          on: ((ev: string, cb: (...args: unknown[]) => void) => {
+            listeners[ev] = listeners[ev] ?? [];
+            listeners[ev].push(cb);
+          }) as IPeerLike['on'],
+          destroy: vi.fn(),
+          reconnect: vi.fn(),
+        };
+      };
+    };
+
+    const host = new PeerManager({ peerFactory: makeFactory(), relayFallbackDelayMs: 50 });
+    const client = new PeerManager({ peerFactory: makeFactory(), relayFallbackDelayMs: 50 });
+
+    await host.hostRoom('RTC01');
+    const joinPromise = client.joinRoom('RTC01');
+    await vi.advanceTimersByTimeAsync(150);
+    await joinPromise;
+
+    expect(client.isUsingRelay()).toBe(true);
+    expect(clientWebRtcClosed).toBe(false);
+
+    (clientWebRtcTriggerOpen as (() => void) | null)?.();
+    expect(client.isUsingRelay()).toBe(false);
+
+    host.disconnect();
+    client.disconnect();
+    vi.useRealTimers();
+  });
+
+  it('resets pauseToggleSeq across sessions and does not double-consume a queued pause toggle when unpausing', () => {
+    const tracker = new InputSequenceTracker();
+    tracker.receivePacket({
+      type: 'input',
+      playerId: 2,
+      clientTick: 1,
+      input: { ...createDefaultPlayerInput(), pauseToggleSeq: 2 },
+    });
+    expect(tracker.hasPendingActions()).toBe(true);
+
+    // Host stepFrame unpauses first, then immediately runs consumeForTick() on the same tick
+    let isPaused = true;
+    if (tracker.consumePauseToggle()) {
+      isPaused = !isPaused;
+    }
+    expect(isPaused).toBe(false);
+    tracker.consumeForTick();
+
+    // The 2nd pause toggle must NOT have been swallowed by consumeForTick()
+    expect(tracker.consumePauseToggle()).toBe(true);
+
+    // Resetting for Match 2 must clear target/delivered pauseToggleSeq
+    tracker.reset();
+    tracker.receivePacket({
+      type: 'input',
+      playerId: 2,
+      clientTick: 1,
+      input: { ...createDefaultPlayerInput(), pauseToggleSeq: 1 },
+    });
+    expect(tracker.consumePauseToggle()).toBe(true);
+  });
+
+  it('rejects null/non-object persistence, uncompacted primitive entities, and unmapped compacted scalars/arrays safely', () => {
+    const base = createMinimalGameState({ roomName: 'spawnRoom' });
+
+    // 1. persistence: null (compacted or uncompacted) must fail packet validation cleanly
+    expect(
+      deserializePacket(
+        JSON.stringify({
+          type: 'state',
+          hostTick: 1,
+          lastProcessedClientTick: 0,
+          state: { ...base, persistence: null },
+        })
+      )
+    ).toBeNull();
+
+    // 2. _cellsCompacted: true + persistence: { extraRoom: null } must NOT throw
+    const withNullExtraPersist = JSON.stringify({
+      type: 'state',
+      _cellsCompacted: true,
+      hostTick: 1,
+      lastProcessedClientTick: 0,
+      state: { ...base, persistence: { extraRoom: null } },
+    });
+    expect(() => deserializePacket(withNullExtraPersist)).not.toThrow();
+    const resNullPersist = deserializePacket(withNullExtraPersist);
+    if (resNullPersist && resNullPersist.type === 'state') {
+      expect(resNullPersist.state.persistence.extraRoom).toBeUndefined();
+    }
+
+    // 3. Uncompacted packet must reject primitive scalars (e.g. doors: [1])
+    expect(
+      deserializePacket(
+        JSON.stringify({
+          type: 'state',
+          hostTick: 1,
+          lastProcessedClientTick: 0,
+          state: {
+            ...base,
+            room: {
+              ...base.room,
+              worlds: {
+                ...base.room.worlds,
+                neutral: { ...base.room.worlds.neutral, doors: [1] },
+              },
+            },
+          },
+        })
+      )
+    ).toBeNull();
+
+    // 4. Compacted packet with out-of-range item index / invalid box array / unmapped scalar door never leaves primitives in WorldGridState
+    const malformedCompacted = deserializePacket(
+      JSON.stringify({
+        type: 'state',
+        _cellsCompacted: true,
+        hostTick: 1,
+        lastProcessedClientTick: 0,
+        state: {
+          ...base,
+          room: {
+            ...base.room,
+            worlds: {
+              ...base.room.worlds,
+              neutral: {
+                ...base.room.worlds.neutral,
+                doors: [999],
+                items: [999],
+                boxes: [[]],
+              },
+            },
+          },
+        },
+      })
+    );
+    expect(malformedCompacted).not.toBeNull();
+    if (malformedCompacted && malformedCompacted.type === 'state') {
+      expect(malformedCompacted.state.room.worlds.neutral.doors).toEqual([]);
+      expect(malformedCompacted.state.room.worlds.neutral.items).toEqual([]);
+      expect(malformedCompacted.state.room.worlds.neutral.boxes).toEqual([]);
+    }
+  });
+
+  it('closes pendingWebRtcConn when WS relay closes on remote disconnect', async () => {
+    vi.useFakeTimers();
+    const sockets = new Map<string, Set<(raw: unknown) => void>>();
+    let clientWebRtcClosed = false;
+
+    const makeFactory = (): PeerFactory => {
+      return (id) => {
+        const myId = id ?? `client-leak-${Math.random().toString(36).slice(2, 6)}`;
+        const listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
+        const sockListeners = new Set<(raw: unknown) => void>();
+        sockets.set(myId, sockListeners);
+
+        const socket: IPeerSocketLike = {
+          send(rawData: unknown) {
+            const msg = JSON.parse(JSON.stringify(rawData)) as {
+              type?: string;
+              dst?: string;
+              payload?: unknown;
+            };
+            const targetSet = msg?.dst ? sockets.get(msg.dst) : undefined;
+            if (!targetSet) return;
+            queueMicrotask(() => {
+              for (const cb of targetSet) {
+                cb({
+                  type: msg.type ?? 'RELAY',
+                  src: myId,
+                  dst: msg.dst,
+                  payload: msg.payload,
+                });
+              }
+            });
+          },
+          on(ev: string, cb: (data: unknown) => void) {
+            if (ev === 'message') sockListeners.add(cb);
+          },
+        };
+
+        queueMicrotask(() => {
+          for (const cb of listeners['open'] ?? []) cb(myId);
+        });
+
+        return {
+          id: myId,
+          socket,
+          isCloudBroker: false,
+          destroyed: false,
+          disconnected: false,
+          disconnect: vi.fn(),
+          connect: (target: string) => {
+            return {
+              peer: target,
+              open: false,
+              send: vi.fn(),
+              close: vi.fn(() => {
+                if (!myId.startsWith('shift-game-room-')) {
+                  clientWebRtcClosed = true;
+                }
+              }),
+              on: vi.fn(),
+            } as unknown as IDataConnectionLike;
+          },
+          on: ((ev: string, cb: (...args: unknown[]) => void) => {
+            listeners[ev] = listeners[ev] ?? [];
+            listeners[ev].push(cb);
+          }) as IPeerLike['on'],
+          destroy: vi.fn(),
+          reconnect: vi.fn(),
+        };
+      };
+    };
+
+    const host = new PeerManager({ peerFactory: makeFactory(), relayFallbackDelayMs: 50 });
+    const client = new PeerManager({ peerFactory: makeFactory(), relayFallbackDelayMs: 50 });
+
+    await host.hostRoom('LKR01');
+    const joinPromise = client.joinRoom('LKR01');
+    await vi.advanceTimersByTimeAsync(150);
+    await joinPromise;
+
+    expect(client.isUsingRelay()).toBe(true);
+    expect(clientWebRtcClosed).toBe(false);
+
+    // Host disconnects -> Client's relay closes -> Client's stalled pendingWebRtcConn MUST be closed too
+    host.disconnect();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(client.getConnectionState()).toBe('disconnected');
+    expect(clientWebRtcClosed).toBe(true);
+
+    client.disconnect();
+    vi.useRealTimers();
   });
 });

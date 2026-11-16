@@ -13,6 +13,21 @@ export default defineConfig({
     port: 4173,
     allowedHosts: true,
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('levelData.json') || id.includes('levelData.ts')) {
+            return 'levels';
+          }
+          if (id.includes('node_modules/peerjs')) {
+            return 'peerjs';
+          }
+          return undefined;
+        },
+      },
+    },
+  },
   test: {
     globals: true,
     environment: 'node',

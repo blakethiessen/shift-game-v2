@@ -1451,4 +1451,102 @@ describe('gameRenderer', () => {
       expect(popupFillCalls[1].x).toBeCloseTo(rightVisibleCenterX, -1);
     });
   });
+
+  describe('Canvas Thrash, Viewport Clipping & HUD Progress Ratios', () => {
+    it('does not resize from 500 to 1000 repeatedly when already in ending phase (gameOver/victory) in online mode', () => {
+      const { canvas } = createMockCanvasAndCtx();
+      canvas.width = 500;
+      let widthWrites: number[] = [];
+      let internalWidth = 500;
+      Object.defineProperty(canvas, 'width', {
+        get: () => internalWidth,
+        set: (v: number) => {
+          internalWidth = v;
+          widthWrites.push(v);
+        },
+      });
+      const renderer = new GameRenderer(
+        canvas,
+        {} as CanvasImageSource,
+        () => createMockCanvasAndCtx().canvas
+      );
+
+      const state = createMockGameState({ phase: 'gameOver' });
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+      expect(widthWrites).toEqual([1000]);
+
+      widthWrites = [];
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'online',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+      expect(widthWrites).toEqual([]);
+    });
+
+    it('renders shift indicator bar at remainingMs/4000 and ping ripple scaled by remainingMs/3000 while clipping overlays to dimension bounds', () => {
+      const { canvas, ctx } = createMockCanvasAndCtx();
+      const arcRadii: number[] = [];
+      const originalArc = ctx.arc as any;
+      (ctx as any).arc = vi.fn((...args: any[]) => {
+        arcRadii.push(args[2]);
+        return originalArc(...args);
+      });
+      const renderer = new GameRenderer(
+        canvas,
+        {} as CanvasImageSource,
+        () => createMockCanvasAndCtx().canvas
+      );
+
+      const state = createMockGameState({
+        shiftRequest: {
+          requestedBy: 1,
+          remainingMs: 2000, // 2000 / 4000 = 0.5 of (460 - 12) = 224px
+          willHitWallForP1: false,
+          willHitWallForP2: false,
+        },
+        players: [
+          createPlayer(1, {
+            x: 100,
+            y: 100,
+            ping: { active: true, x: 250, y: 250, kind: 'here', remainingMs: 1500 }, // 1 - 1500/3000 = 0.5 -> r = 10 + 14 = 24
+          }),
+          createPlayer(2, { x: 200, y: 200 }),
+        ],
+      });
+
+      renderer.render(
+        state,
+        {
+          localPlayerId: 1,
+          mode: 'local',
+          partnerVisibility: 'strict',
+          lightingEnabled: false,
+        },
+        16.67
+      );
+
+      // Post-lighting overlay clips to each dimension rect [offsetX, 0, 500, 650]
+      expect(ctx.rect).toHaveBeenCalledWith(0, 0, 500, 650);
+      expect(ctx.rect).toHaveBeenCalledWith(500, 0, 500, 650);
+      // Ping outer arc radius at half lifetime (1500 / 3000) is 24px
+      expect(arcRadii.some((r) => Math.abs(r - 24) < 0.05)).toBe(true);
+      // Shift progress bar width should be 224px ((460 - 12) * 2000 / 4000)
+      expect(ctx.fillRect).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), 224, 4);
+    });
+  });
 });

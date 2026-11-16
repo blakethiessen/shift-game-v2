@@ -355,5 +355,117 @@ describe('puzzlesAndWorld', () => {
     state.players[1].y = dSafePlate.y;
     engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
     expect(state.safePressurePlatesPressed).toBe(2);
+
+    // Solving only pressurePlateRoom1 (2 plates) must NOT unlock safeRoom before pressurePlateRoom2
+    engine.loadRoom('safeRoom');
+    state = engine.getState();
+    engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
+    expect(state.room.worlds.neutral.safes[0].opened).toBe(false);
+  });
+
+  it('caps contiguous multi-fire overlap in kitchenPuzzle to a single 0.5x hit per cooldown window', () => {
+    const engine = new GameEngine(42);
+    engine.loadRoom('kitchenPuzzle');
+    const state = engine.getState();
+
+    // Active Fire1 pair at (1, 5) = (25, 125) and (2, 5) = (50, 125)
+    // Position P1 at the exact seam (37, 125) overlapping BOTH fires simultaneously
+    state.players[0].x = 37;
+    state.players[0].y = 125;
+    state.players[1].x = 300;
+    state.players[1].y = 300;
+
+    engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
+    // Must only take 0.5 damage once (2.0 -> 1.0), NOT 2.0 -> 0.5 across both adjacent fire entities!
+    expect(state.players[0].speed).toBeCloseTo(1.0, 4);
+  });
+
+  it('prevents GemStatue cross-dimension insertion from dangerous world and ignores duplicate gem slots', () => {
+    const engine = new GameEngine(42);
+    engine.loadRoom('choiceRoom');
+    const state = engine.getState();
+
+    // choiceRoom has GemStatue ONLY in neutral at (250, 300); dangerous has NO statue there.
+    expect(state.room.worlds.dangerous.statues.length).toBe(0);
+    state.players[1].x = 250;
+    state.players[1].y = 275;
+    state.players[1].direction = Direction.Down;
+    state.players[1].inventory = [
+      { id: 'red-1', type: 'RedGem', popUpText: 'Red Gem' },
+    ];
+
+    const p2In = createDefaultPlayerInput();
+    p2In.useItemSeq = 1;
+    engine.tick(16.67, createDefaultPlayerInput(), p2In);
+    expect(state.room.worlds.neutral.statues[0].hasRedGem).toBe(false);
+    expect(state.players[1].inventory.length).toBe(1);
+
+    // P1 in neutral inserts RedGem, then duplicate RedGem must NOT be consumed
+    state.players[0].x = 250;
+    state.players[0].y = 275;
+    state.players[0].direction = Direction.Down;
+    state.players[0].inventory = [
+      { id: 'r1', type: 'RedGem', popUpText: 'Red Gem' },
+      { id: 'r2', type: 'RedGem', popUpText: 'Red Gem' },
+    ];
+    const p1In = createDefaultPlayerInput();
+    p1In.useItemSeq = 1;
+    engine.tick(16.67, p1In, p2In);
+    expect(state.room.worlds.neutral.statues[0].hasRedGem).toBe(true);
+    expect(state.players[0].inventory.length).toBe(1);
+
+    p1In.useItemSeq = 2;
+    engine.tick(16.67, p1In, p2In);
+    expect(state.players[0].inventory.length).toBe(1);
+  });
+
+  it('clears stale shiftRequest on loadRoom and prevents void strand/shift in possibleFinalRoom', () => {
+    const engine = new GameEngine(42);
+    const p1In = createDefaultPlayerInput();
+    p1In.shiftRequestSeq = 1;
+    engine.tick(16.67, p1In, createDefaultPlayerInput());
+    expect(engine.getState().shiftRequest.requestedBy).toBe(1);
+
+    engine.loadRoom('possibleFinalRoom');
+    const state = engine.getState();
+    expect(state.shiftRequest.requestedBy).toBeNull();
+    expect(state.evilOnLeft).toBe(false);
+
+    // Even attempting individual/simultaneous shift in possibleFinalRoom must not put players in exterior void
+    state.lobbyConfig.shiftMode = 'individual';
+    state.players[0].x = 18 * 25;
+    state.players[0].y = 22 * 25;
+    p1In.shiftRequestSeq = 2;
+    engine.tick(16.67, p1In, createDefaultPlayerInput());
+    expect(state.evilOnLeft).toBe(false);
+  });
+
+  it('unlocks linked destination LockedDoor on spawnHallway <-> spawnRoom shortcut', () => {
+    const engine = new GameEngine(42);
+    engine.loadRoom('spawnHallway');
+    let state = engine.getState();
+
+    const hallDoor = state.room.worlds.neutral.doors.find(
+      (d) => d.kind === 'LockedDoor' && d.connectedRoom === 'spawnRoom'
+    )!;
+    expect(hallDoor).toBeDefined();
+
+    state.players[0].x = hallDoor.x + 25;
+    state.players[0].y = hallDoor.y;
+    state.players[0].direction = Direction.Left;
+    state.players[0].inventory = [{ id: 'k1', type: 'Key', popUpText: 'Key' }];
+
+    const p1In = createDefaultPlayerInput();
+    p1In.useItemSeq = 1;
+    engine.tick(16.67, p1In, createDefaultPlayerInput());
+    expect(hallDoor.unlocked).toBe(true);
+
+    // Cross back to spawnRoom -> paired door at [450, 300] must also be unlocked!
+    engine.loadRoom('spawnRoom');
+    state = engine.getState();
+    const spawnBackDoor = state.room.worlds.neutral.doors.find(
+      (d) => d.kind === 'LockedDoor' && d.connectedRoom === 'spawnHallway'
+    )!;
+    expect(spawnBackDoor.unlocked).toBe(true);
   });
 });

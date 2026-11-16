@@ -4,6 +4,7 @@
 
 import { RAW_LEVELS } from './levelData';
 import {
+  cloneGridCells,
   createEmptyRoomPersistence,
   getStaticRoomCells,
   parseRoom,
@@ -68,6 +69,8 @@ function createInitialPlayerState(
     isMoving: false,
     boxColliding: false,
     regenTimerMs: 0,
+    attackCooldownMs: 0,
+    fireDamageCooldownMs: 0,
     inventory: [],
     currentItemIndex: 0,
     inventoryDisplayTimerMs: 0,
@@ -248,6 +251,7 @@ export class GameEngine implements IGameEngine {
       y: t.y,
       angle: t.angle,
       stage: t.stage,
+      hasSpread: t.hasSpread,
     }));
   }
 
@@ -292,6 +296,32 @@ export class GameEngine implements IGameEngine {
     this.state.players[1].interactingObjectId = null;
     this.state.players[0].activePopupText = null;
     this.state.players[1].activePopupText = null;
+    this.state.players[0].ping = null;
+    this.state.players[1].ping = null;
+    this.state.players[0].boxColliding = false;
+    this.state.players[1].boxColliding = false;
+    this.state.players[0].fireDamageCooldownMs = 0;
+    this.state.players[1].fireDamageCooldownMs = 0;
+    this.state.players[0].attackState = {
+      active: false,
+      weapon: null,
+      timerMs: 0,
+      direction: this.state.players[0].direction,
+      hasDealtKnockback: false,
+    };
+    this.state.players[1].attackState = {
+      active: false,
+      weapon: null,
+      timerMs: 0,
+      direction: this.state.players[1].direction,
+      hasDealtKnockback: false,
+    };
+    this.state.shiftRequest = {
+      requestedBy: null,
+      remainingMs: 0,
+      willHitWallForP1: false,
+      willHitWallForP2: false,
+    };
 
     this.lastP2ForcedTeleportTick = this.state.tick;
     this.pendingClientP2Sync = null;
@@ -326,19 +356,32 @@ export class GameEngine implements IGameEngine {
         dangerousWorld.cells = [];
         this.state = structuredClone(snapshot);
       } finally {
-        neutralWorld.cells =
-          Array.isArray(prevNeutralCells) && prevNeutralCells.length > 0
-            ? prevNeutralCells
-            : staticCells.neutral;
-        dangerousWorld.cells =
-          Array.isArray(prevDangerousCells) && prevDangerousCells.length > 0
-            ? prevDangerousCells
-            : staticCells.dangerous;
+        neutralWorld.cells = prevNeutralCells;
+        dangerousWorld.cells = prevDangerousCells;
       }
-      this.state.room.worlds.neutral.cells = staticCells.neutral;
-      this.state.room.worlds.dangerous.cells = staticCells.dangerous;
+      this.state.room.worlds.neutral.cells = cloneGridCells(staticCells.neutral);
+      this.state.room.worlds.dangerous.cells = cloneGridCells(staticCells.dangerous);
     } else {
       this.state = structuredClone(snapshot);
+    }
+    if (this.state.inputSeqState) {
+      const { p1, p2 } = this.state.inputSeqState;
+      this.p1Seq = {
+        useItemSeq: p1.useItemSeq,
+        interactSeq: p1.interactSeq,
+        inventoryCycleSeq: p1.inventoryCycleSeq,
+        inventoryDropSeq: p1.inventoryDropSeq,
+        pingSeq: p1.pingSeq,
+      };
+      this.p2Seq = {
+        useItemSeq: p2.useItemSeq,
+        interactSeq: p2.interactSeq,
+        inventoryCycleSeq: p2.inventoryCycleSeq,
+        inventoryDropSeq: p2.inventoryDropSeq,
+        pingSeq: p2.pingSeq,
+      };
+      this.lastP1ShiftSeq = p1.shiftRequestSeq;
+      this.lastP2ShiftSeq = p2.shiftRequestSeq;
     }
     this.rng.setState(this.state.rngState);
   }
@@ -362,10 +405,18 @@ export class GameEngine implements IGameEngine {
       const p2World = getWorldForSide('right', this.state.evilOnLeft);
       const p2Grid = this.state.room.worlds[p2World];
       if (doesPlayerCollideWithWalls(p2Grid, sync.x, sync.y)) {
+        this.lastP2ForcedTeleportTick = this.state.tick;
         return;
       }
     }
     if (sync.ackHostTick < this.lastP2ForcedTeleportTick) {
+      return;
+    }
+    if (
+      Math.hypot(sync.x - this.state.players[1].x, sync.y - this.state.players[1].y) >
+      TILE_SIZE_PX * 4
+    ) {
+      this.lastP2ForcedTeleportTick = this.state.tick;
       return;
     }
     this.pendingClientP2Sync = sync;
@@ -509,6 +560,11 @@ export class GameEngine implements IGameEngine {
       );
     }
 
+    // Final converging room cannot shift dimensions (would misalign asymmetric corridors)
+    if (this.state.roomName === 'possibleFinalRoom') {
+      return;
+    }
+
     if (this.state.lobbyConfig.shiftMode === 'individual') {
       if (
         (p1Requested || p2Requested) &&
@@ -619,6 +675,17 @@ export class GameEngine implements IGameEngine {
       this.hasClientPlayerSync
     );
 
+    if (
+      p2Sync &&
+      Math.hypot(
+        p2Sync.x - this.state.players[1].x,
+        p2Sync.y - this.state.players[1].y
+      ) >
+        TILE_SIZE_PX * 1.5
+    ) {
+      this.lastP2ForcedTeleportTick = this.state.tick;
+    }
+
     // 2. Process dimension shift requests / confirmations
     if (this.state.phase === 'playing') {
       this.handleShiftInput(dtMs, p1Input, p2Input);
@@ -662,6 +729,10 @@ export class GameEngine implements IGameEngine {
     );
     this.state.convergenceDistance = tileManhattanDistance(p1Tile, p2Tile);
     this.state.rngState = this.rng.getState();
+    this.state.inputSeqState = {
+      p1: { ...this.p1Seq, shiftRequestSeq: this.lastP1ShiftSeq },
+      p2: { ...this.p2Seq, shiftRequestSeq: this.lastP2ShiftSeq },
+    };
 
     return this.state;
   }

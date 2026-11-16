@@ -1227,4 +1227,118 @@ describe('ShiftGameApp End-to-End Integration', () => {
 
     app.destroy();
   });
+
+  it('resets InputManager sequence counters cleanly across consecutive game sessions (C-01)', () => {
+    const container = document.createElement('div');
+    const canvas = createMockCanvas();
+    container.appendChild(canvas);
+    document.body.appendChild(container);
+    const target = new EventTarget();
+
+    const app = new ShiftGameApp({
+      container,
+      canvas,
+      canvasFactory: () => createMockCanvas(),
+      inputTarget: target,
+      autoStartLoop: false,
+      mobileControlsEnabled: false,
+    });
+
+    app.startLocalGame({ shiftMode: 'individual' });
+    // Trigger Shift + Interact + Ping in Game 1
+    target.dispatchEvent(new KeyboardEvent('keydown', { code: 'ShiftLeft' }));
+    target.dispatchEvent(new KeyboardEvent('keyup', { code: 'ShiftLeft' }));
+    target.dispatchEvent(new KeyboardEvent('keydown', { code: 'Digit1' }));
+    target.dispatchEvent(new KeyboardEvent('keyup', { code: 'Digit1' }));
+    target.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE' }));
+    target.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyE' }));
+    app.stepFrame(SIMULATION_TICK_MS);
+    expect(app.getState().evilOnLeft).toBe(true);
+
+    // Return to title and start Game 2 cleanly with zero keys pressed
+    app.returnToTitle();
+    app.startLocalGame({ shiftMode: 'individual' });
+    app.stepFrame(SIMULATION_TICK_MS);
+
+    // Must NOT phantom-shift on Tick 1 of Game 2 or fire phantom ping/sounds!
+    expect(app.getState().evilOnLeft).toBe(false);
+    expect(app.getState().players[0].ping).toBeNull();
+
+    app.destroy();
+  });
+
+  it('reconciles permanent >100px / missed playerDamaged split-brain desync and syncs Online Client Pause (C-05, H-07)', () => {
+    const bus = new InMemoryPeerBus();
+    const hostPeer = new PeerManager(bus.createPeerFactory());
+    const clientPeer = new PeerManager(bus.createPeerFactory());
+
+    const hostContainer = document.createElement('div');
+    const clientContainer = document.createElement('div');
+    const hostTarget = new EventTarget();
+    const clientTarget = new EventTarget();
+
+    const hostApp = new ShiftGameApp({
+      container: hostContainer,
+      canvas: createMockCanvas(),
+      canvasFactory: () => createMockCanvas(),
+      peerManager: hostPeer,
+      inputTarget: hostTarget,
+      autoStartLoop: false,
+      mobileControlsEnabled: false,
+    });
+    const clientApp = new ShiftGameApp({
+      container: clientContainer,
+      canvas: createMockCanvas(),
+      canvasFactory: () => createMockCanvas(),
+      peerManager: clientPeer,
+      inputTarget: clientTarget,
+      autoStartLoop: false,
+      mobileControlsEnabled: false,
+    });
+
+    const config = {
+      mode: 'online' as const,
+      partnerVisibility: 'strict' as const,
+      shiftMode: 'cooperative' as const,
+      muffledCrossDimensionAudio: true,
+    };
+
+    return (async () => {
+      const code = await hostPeer.hostRoom();
+      await clientPeer.joinRoom(code);
+
+      hostApp.startOnlineGame(config, true);
+      clientApp.startOnlineGame(config, false);
+
+      hostApp.stepFrame(SIMULATION_TICK_MS);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // 1. Client simulates >120px divergence from Host without Host accepting it (e.g. mobile stall)
+      clientApp.getEngine().getState().players[1].x = 400;
+      clientApp.stepFrame(SIMULATION_TICK_MS);
+      hostApp.stepFrame(SIMULATION_TICK_MS);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Host rejects (>100px linear jump) AND bumps forcedTeleportTick so Client snaps back instead of permanent split-brain!
+      expect(clientApp.getState().players[1].x).toBeLessThan(300);
+
+      // 2. Client presses Pause (KeyP) -> pauses BOTH Client and Host authoritatively
+      clientTarget.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyP' }));
+      clientTarget.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyP' }));
+      clientApp.stepFrame(SIMULATION_TICK_MS);
+      await Promise.resolve();
+      hostApp.stepFrame(SIMULATION_TICK_MS);
+      await Promise.resolve();
+      hostApp.stepFrame(SIMULATION_TICK_MS);
+      await Promise.resolve();
+
+      expect(hostApp.getState().isPaused).toBe(true);
+      expect(clientApp.getState().isPaused).toBe(true);
+
+      hostApp.destroy();
+      clientApp.destroy();
+    })();
+  });
 });

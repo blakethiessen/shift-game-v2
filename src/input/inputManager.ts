@@ -137,7 +137,7 @@ const KEY_CODE_LABELS: Record<string, string> = {
 };
 
 export function formatKeyCode(code: string): string {
-  if (!code) return '';
+  if (typeof code !== 'string' || !code) return '';
   if (KEY_CODE_LABELS[code]) {
     return KEY_CODE_LABELS[code];
   }
@@ -287,11 +287,15 @@ export class InputManager implements IInputManager {
       this.target.addEventListener('keydown', this.boundKeyDown);
       this.target.addEventListener('keyup', this.boundKeyUp);
       this.target.addEventListener('blur', this.boundBlur);
+      this.target.addEventListener('contextmenu', this.boundBlur);
       this.target.addEventListener('gamepadconnected', this.boundGamepadChange);
       this.target.addEventListener(
         'gamepaddisconnected',
         this.boundGamepadChange
       );
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.boundBlur);
     }
   }
 
@@ -345,6 +349,23 @@ export class InputManager implements IInputManager {
     }
   }
 
+  private sanitizeBindingsGroup<T extends object>(
+    defaults: T,
+    candidate: unknown
+  ): T {
+    const out: Record<string, string> = { ...(defaults as Record<string, string>) };
+    if (candidate && typeof candidate === 'object') {
+      const rec = candidate as Record<string, unknown>;
+      for (const k of Object.keys(out)) {
+        const val = rec[k];
+        if (typeof val === 'string' && val.trim().length > 0) {
+          out[k] = val;
+        }
+      }
+    }
+    return out as T;
+  }
+
   private loadSettings(): ControlSettings {
     const defaults = createDefaultControlSettings();
     if (!this.storage) {
@@ -353,11 +374,12 @@ export class InputManager implements IInputManager {
     try {
       const raw = this.storage.getItem(STORAGE_KEY);
       if (!raw) return defaults;
-      const parsed = JSON.parse(raw) as Partial<ControlSettings>;
+      const parsed = JSON.parse(raw) as Partial<ControlSettings> | null;
+      if (!parsed || typeof parsed !== 'object') return defaults;
       return {
-        p1: { ...defaults.p1, ...(parsed.p1 ?? {}) },
-        p2: { ...defaults.p2, ...(parsed.p2 ?? {}) },
-        common: { ...defaults.common, ...(parsed.common ?? {}) },
+        p1: this.sanitizeBindingsGroup(defaults.p1, parsed.p1),
+        p2: this.sanitizeBindingsGroup(defaults.p2, parsed.p2),
+        common: this.sanitizeBindingsGroup(defaults.common, parsed.common),
       };
     } catch {
       return defaults;
@@ -381,11 +403,12 @@ export class InputManager implements IInputManager {
     try {
       const raw = this.storage.getItem(GAMEPAD_STORAGE_KEY);
       if (!raw) return defaults;
-      const parsed = JSON.parse(raw) as Partial<ControlSettings>;
+      const parsed = JSON.parse(raw) as Partial<ControlSettings> | null;
+      if (!parsed || typeof parsed !== 'object') return defaults;
       return {
-        p1: { ...defaults.p1, ...(parsed.p1 ?? {}) },
-        p2: { ...defaults.p2, ...(parsed.p2 ?? {}) },
-        common: { ...defaults.common, ...(parsed.common ?? {}) },
+        p1: this.sanitizeBindingsGroup(defaults.p1, parsed.p1),
+        p2: this.sanitizeBindingsGroup(defaults.p2, parsed.p2),
+        common: this.sanitizeBindingsGroup(defaults.common, parsed.common),
       };
     } catch {
       return defaults;
@@ -414,6 +437,12 @@ export class InputManager implements IInputManager {
 
   public getPlayMode(): PlayMode {
     return this.mode;
+  }
+
+  public resetSequenceCounters(): void {
+    this.p1Input = createDefaultPlayerInput();
+    this.p2Input = createDefaultPlayerInput();
+    this.clearHeldState();
   }
 
   public setEnabled(enabled: boolean): void {
@@ -863,6 +892,7 @@ export class InputManager implements IInputManager {
       this.bindingChangeListeners.forEach((cb) => cb());
     }
 
+    const wasEnabledAtPollStart = this.enabled;
     const activePadIndices = new Set<number>();
     const nextDirs: Record<PlayerId, DirectionalState> = {
       1: { up: false, down: false, left: false, right: false },
@@ -1048,7 +1078,7 @@ export class InputManager implements IInputManager {
             );
           }
 
-          if (this.enabled) {
+          if (wasEnabledAtPollStart && this.enabled) {
             // Common actions: Pause, Mute, SwitchDimensions
             const isPauseMatch =
               this.gamepadSettings.common.Pause === btnCode ||
@@ -1330,20 +1360,40 @@ export class InputManager implements IInputManager {
     code: string
   ): void {
     this.cancelAllInventoryHolds();
-    if (group === 'p1' && action in this.settings.p1) {
-      this.settings.p1[action as keyof PlayerKeyBindings] = code;
-    } else if (group === 'p2' && action in this.settings.p2) {
-      this.settings.p2[action as keyof PlayerKeyBindings] = code;
-    } else if (group === 'common' && action in this.settings.common) {
-      this.settings.common[action as keyof CommonKeyBindings] = code;
-    }
-    this.saveSettings();
     if (isGamepadButtonCode(code)) {
-      this.applyGamepadBindingWithSwap(group, action, code);
+      this.applyBindingWithSwap(this.settings, group, action, code);
+      this.saveSettings();
+      this.applyBindingWithSwap(this.gamepadSettings, group, action, code);
       this.saveGamepadSettings();
+    } else {
+      this.applyBindingWithSwap(this.settings, group, action, code);
+      this.saveSettings();
     }
     this.recomputeDirectionalHoldStates();
     this.bindingChangeListeners.forEach((cb) => cb());
+  }
+
+  private applyBindingWithSwap(
+    target: ControlSettings,
+    group: 'p1' | 'p2' | 'common',
+    action: string,
+    code: string
+  ): void {
+    const table =
+      group === 'p1' ? target.p1 : group === 'p2' ? target.p2 : target.common;
+    const typedTable = table as unknown as Record<string, string>;
+    if (!(action in typedTable)) return;
+
+    const prevCode = typedTable[action];
+    for (const sub of [target.p1, target.p2, target.common]) {
+      const rec = sub as unknown as Record<string, string>;
+      for (const k of Object.keys(rec)) {
+        if ((sub !== table || k !== action) && rec[k] === code) {
+          rec[k] = prevCode;
+        }
+      }
+    }
+    typedTable[action] = code;
   }
 
   private applyGamepadBindingWithSwap(
@@ -1351,68 +1401,7 @@ export class InputManager implements IInputManager {
     action: string,
     code: string
   ): void {
-    if (group === 'p1' && action in this.gamepadSettings.p1) {
-      const key = action as keyof PlayerKeyBindings;
-      const prevCode = this.gamepadSettings.p1[key];
-      for (const k of Object.keys(this.gamepadSettings.p1) as Array<
-        keyof PlayerKeyBindings
-      >) {
-        if (k !== key && this.gamepadSettings.p1[k] === code) {
-          this.gamepadSettings.p1[k] = prevCode;
-        }
-      }
-      for (const ck of Object.keys(this.gamepadSettings.common) as Array<
-        keyof CommonKeyBindings
-      >) {
-        if (this.gamepadSettings.common[ck] === code) {
-          this.gamepadSettings.common[ck] = prevCode;
-        }
-      }
-      this.gamepadSettings.p1[key] = code;
-    } else if (group === 'p2' && action in this.gamepadSettings.p2) {
-      const key = action as keyof PlayerKeyBindings;
-      const prevCode = this.gamepadSettings.p2[key];
-      for (const k of Object.keys(this.gamepadSettings.p2) as Array<
-        keyof PlayerKeyBindings
-      >) {
-        if (k !== key && this.gamepadSettings.p2[k] === code) {
-          this.gamepadSettings.p2[k] = prevCode;
-        }
-      }
-      for (const ck of Object.keys(this.gamepadSettings.common) as Array<
-        keyof CommonKeyBindings
-      >) {
-        if (this.gamepadSettings.common[ck] === code) {
-          this.gamepadSettings.common[ck] = prevCode;
-        }
-      }
-      this.gamepadSettings.p2[key] = code;
-    } else if (group === 'common' && action in this.gamepadSettings.common) {
-      const key = action as keyof CommonKeyBindings;
-      const prevCode = this.gamepadSettings.common[key];
-      for (const k of Object.keys(this.gamepadSettings.common) as Array<
-        keyof CommonKeyBindings
-      >) {
-        if (k !== key && this.gamepadSettings.common[k] === code) {
-          this.gamepadSettings.common[k] = prevCode;
-        }
-      }
-      for (const pk of Object.keys(this.gamepadSettings.p1) as Array<
-        keyof PlayerKeyBindings
-      >) {
-        if (this.gamepadSettings.p1[pk] === code) {
-          this.gamepadSettings.p1[pk] = prevCode;
-        }
-      }
-      for (const pk of Object.keys(this.gamepadSettings.p2) as Array<
-        keyof PlayerKeyBindings
-      >) {
-        if (this.gamepadSettings.p2[pk] === code) {
-          this.gamepadSettings.p2[pk] = prevCode;
-        }
-      }
-      this.gamepadSettings.common[key] = code;
-    }
+    this.applyBindingWithSwap(this.gamepadSettings, group, action, code);
   }
 
   public updateGamepadBinding(
@@ -1576,6 +1565,7 @@ export class InputManager implements IInputManager {
       this.target.removeEventListener('keydown', this.boundKeyDown);
       this.target.removeEventListener('keyup', this.boundKeyUp);
       this.target.removeEventListener('blur', this.boundBlur);
+      this.target.removeEventListener('contextmenu', this.boundBlur);
       this.target.removeEventListener(
         'gamepadconnected',
         this.boundGamepadChange
@@ -1584,6 +1574,9 @@ export class InputManager implements IInputManager {
         'gamepaddisconnected',
         this.boundGamepadChange
       );
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.boundBlur);
     }
     this.pauseListeners = [];
     this.muteListeners = [];

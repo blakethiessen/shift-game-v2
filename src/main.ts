@@ -2,16 +2,17 @@
 // Browser entry point for Shift: The Game.
 
 import './style.css';
-import { ShiftGameApp } from './app';
 import { setupPasswordGate } from './ui/passwordGate';
 
-function bootGame(): void {
+async function bootGame(): Promise<void> {
   const stage = document.getElementById('ui-overlay');
   const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
 
   if (!stage || !canvas) {
     throw new Error('Missing #ui-overlay or #game-canvas in index.html');
   }
+
+  const { ShiftGameApp } = await import('./app');
 
   const app = new ShiftGameApp({
     container: stage,
@@ -28,7 +29,9 @@ function bootGame(): void {
 
 function bootstrap(): void {
   setupPasswordGate({
-    onUnlocked: bootGame,
+    onUnlocked: () => {
+      void bootGame();
+    },
   });
 }
 

@@ -65,11 +65,17 @@ export function tileToSourceRect(
   w: number = TILE_SIZE_PX,
   h: number = TILE_SIZE_PX
 ): SpriteRect {
+  const x = col * TILE_SIZE_PX;
+  const y = row * TILE_SIZE_PX;
+  const clampedW =
+    x < SPRITESHEET_WIDTH ? Math.min(w, SPRITESHEET_WIDTH - x) : w;
+  const clampedH =
+    y < SPRITESHEET_HEIGHT ? Math.min(h, SPRITESHEET_HEIGHT - y) : h;
   return {
-    x: col * TILE_SIZE_PX,
-    y: row * TILE_SIZE_PX,
-    w,
-    h,
+    x,
+    y,
+    w: clampedW,
+    h: clampedH,
   };
 }
 
@@ -579,11 +585,11 @@ export function getEvilLampSpriteRect(
 
 /**
  * Fire animations:
- * - Active red/orange (isOn === true): cols 60..62, row 57
- * - Off/pilot blue soul-flame (isOn === false): cols 65..69, row 57
+ * - Active red/orange (isOn === true): cols 60..63, row 57 (cols 60..62 primary loop)
+ * - Off/pilot blue soul-flame (isOn === false): cols 66..69, row 57 (col 65 is blank)
  */
 export function getFireAnimFrames(isOn: boolean): SpriteRect[] {
-  const startCol = isOn ? 60 : 65;
+  const startCol = isOn ? 60 : 66;
   const endCol = isOn ? 62 : 69;
   const frames: SpriteRect[] = [];
   for (let col = startCol; col <= endCol; col++) {
@@ -627,17 +633,17 @@ const TEAR_SPAWN_VERTICAL_STAGES: Array<[number, number, number]> = [
 const TEAR_DIAGONAL_STAGES: Array<[number, number, number]> = [
   [0, 5, 57],
   [6, 10, 57],
-  [1, 15, 57],
+  [11, 15, 57],
   [16, 20, 57],
   [21, 26, 57],
 ];
 
 const TEAR_SPAWN_HORIZONTAL_STAGES: Array<[number, number, number]> = [
-  [19, 25, 53],
-  [24, 30, 53],
-  [29, 35, 53],
-  [34, 40, 53],
-  [39, 42, 53],
+  [10, 15, 53],
+  [14, 19, 53],
+  [18, 23, 53],
+  [22, 27, 53],
+  [26, 33, 53],
 ];
 
 export function getDimensionTearAnim(

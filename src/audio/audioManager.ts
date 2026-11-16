@@ -143,7 +143,15 @@ export interface ActiveLoopState {
 const CROSS_DIM_LOWPASS_HZ = 350;
 const CROSS_DIM_GAIN_FACTOR = 0.45;
 
+export interface AudioManagerOptions {
+  createAudioContext?: () => AudioContext | null;
+  fetchFn?: typeof fetch;
+}
+
 export class AudioManager implements IAudioManager {
+  private readonly createAudioContext?: () => AudioContext | null;
+  private readonly fetchFn?: typeof fetch;
+
   private sfxVolume = 0.7;
   private musicVolume = 0.5;
   private muted = false;
@@ -153,6 +161,7 @@ export class AudioManager implements IAudioManager {
   private audioCtx: AudioContext | null = null;
   private bufferCache = new Map<string, AudioBuffer>();
   private loadingPromises = new Map<string, Promise<AudioBuffer | null>>();
+  private failedPaths = new Set<string>();
 
   private activeChannels: ActiveSfxChannel[] = [];
   private activeLoops: Partial<Record<LoopKey, ActiveLoopState>> = {};
@@ -164,14 +173,27 @@ export class AudioManager implements IAudioManager {
   private processedEventIds = new Set<number>();
   private lastProcessedTick = -1;
   private ambientCreakCounter = 0;
+  private boundVisibilityChange: (() => void) | null = null;
+
+  constructor(options?: AudioManagerOptions) {
+    this.createAudioContext = options?.createAudioContext;
+    this.fetchFn = options?.fetchFn;
+  }
 
   public async init(): Promise<void> {
     if (this.initialized) {
+      this.ensureContextResumed();
       return;
     }
     this.initialized = true;
 
-    if (typeof window !== 'undefined') {
+    if (this.createAudioContext) {
+      try {
+        this.audioCtx = this.createAudioContext();
+      } catch {
+        this.audioCtx = null;
+      }
+    } else if (typeof window !== 'undefined') {
       const AudioContextCtor =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext?: typeof AudioContext })
@@ -184,18 +206,37 @@ export class AudioManager implements IAudioManager {
         }
       }
     }
+    this.ensureContextResumed();
+
+    if (
+      typeof document !== 'undefined' &&
+      !this.boundVisibilityChange
+    ) {
+      this.boundVisibilityChange = () => {
+        if (!this.audioCtx) return;
+        if (document.hidden) {
+          this.audioCtx.suspend?.().catch(() => {});
+        } else {
+          this.ensureContextResumed();
+        }
+      };
+      document.addEventListener('visibilitychange', this.boundVisibilityChange);
+    }
   }
 
   private ensureContextResumed(): void {
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume().catch(() => {
+    const state = this.audioCtx?.state as string | undefined;
+    if (this.audioCtx && (state === 'suspended' || state === 'interrupted')) {
+      this.audioCtx.resume?.().catch(() => {
         // Ignore autoplay restrictions until user gesture
       });
     }
   }
 
   private async loadAudioBuffer(path: string): Promise<AudioBuffer | null> {
-    if (!this.audioCtx || typeof fetch === 'undefined') {
+    const fetcher =
+      this.fetchFn ?? (typeof fetch !== 'undefined' ? fetch : undefined);
+    if (!this.audioCtx || !fetcher || this.failedPaths.has(path)) {
       return null;
     }
     const cached = this.bufferCache.get(path);
@@ -209,14 +250,18 @@ export class AudioManager implements IAudioManager {
 
     const promise = (async () => {
       try {
-        const res = await fetch(path);
-        if (!res.ok) return null;
+        const res = await fetcher(path);
+        if (!res.ok) {
+          this.failedPaths.add(path);
+          return null;
+        }
         const arr = await res.arrayBuffer();
         if (!this.audioCtx) return null;
         const decoded = await this.audioCtx.decodeAudioData(arr);
         this.bufferCache.set(path, decoded);
         return decoded;
       } catch {
+        this.failedPaths.add(path);
         return null;
       } finally {
         this.loadingPromises.delete(path);
@@ -325,7 +370,10 @@ export class AudioManager implements IAudioManager {
       gainNode.connect(ctx.destination);
 
       void this.loadAudioBuffer(path).then((buffer) => {
-        if (stopped || !buffer || !this.audioCtx) return;
+        if (stopped || !buffer || !this.audioCtx) {
+          cleanup();
+          return;
+        }
         try {
           sourceNode = ctx.createBufferSource();
           sourceNode.buffer = buffer;
@@ -383,7 +431,13 @@ export class AudioManager implements IAudioManager {
 
       const path = SOUND_EFFECT_PATHS[sound];
       void this.loadAudioBuffer(path).then((buffer) => {
-        if (stopped || !buffer || !this.audioCtx) return;
+        if (stopped || !buffer || !this.audioCtx) {
+          loopState.stop();
+          if (this.activeLoops[key] === loopState) {
+            delete this.activeLoops[key];
+          }
+          return;
+        }
         try {
           sourceNode = ctx.createBufferSource();
           sourceNode.buffer = buffer;
@@ -394,7 +448,10 @@ export class AudioManager implements IAudioManager {
           }
           sourceNode.start(0);
         } catch {
-          // Ignore start errors
+          loopState.stop();
+          if (this.activeLoops[key] === loopState) {
+            delete this.activeLoops[key];
+          }
         }
       });
     }
@@ -464,17 +521,38 @@ export class AudioManager implements IAudioManager {
 
       const path = MUSIC_TRACK_PATHS[name];
       void this.loadAudioBuffer(path).then((buffer) => {
-        if (stopped || !buffer || !this.audioCtx) return;
+        if (stopped || !buffer || !this.audioCtx) {
+          if (!stopped && this.currentMusicTrack === name) {
+            this.stopMusic();
+          }
+          return;
+        }
         try {
           sourceNode = ctx.createBufferSource();
           sourceNode.buffer = buffer;
           sourceNode.loop = loop;
+          sourceNode.onended = () => {
+            if (!loop && !stopped && this.currentMusicTrack === name) {
+              stopped = true;
+              this.currentMusicStop = null;
+              this.currentMusicUpdateGain = null;
+              this.currentMusicTrack = null;
+              try {
+                sourceNode?.disconnect();
+                gainNode?.disconnect();
+              } catch {
+                // Ignore
+              }
+            }
+          };
           if (gainNode) {
             sourceNode.connect(gainNode);
           }
           sourceNode.start(0);
         } catch {
-          // Ignore
+          if (!stopped && this.currentMusicTrack === name) {
+            this.stopMusic();
+          }
         }
       });
     }
@@ -570,6 +648,7 @@ export class AudioManager implements IAudioManager {
 
     if (
       state.isPaused ||
+      state.phase === 'dying' ||
       state.phase === 'gameOver' ||
       state.phase === 'victory'
     ) {
@@ -578,7 +657,7 @@ export class AudioManager implements IAudioManager {
       this.setLoopState('fire', 'fire', false, false, 1.0, 0);
       this.setLoopState('heartBeat', 'heartBeat', false, false, 1.0, 0);
       this.setLoopState('blobbyTracking', 'blobbyTracking', false, false, 1.0, 0);
-      if (state.phase === 'gameOver' || state.phase === 'victory') {
+      if (state.phase !== 'playing') {
         this.stopMusic();
       } else if (state.isPaused) {
         this.currentMusicUpdateGain?.(0);
@@ -798,6 +877,31 @@ export class AudioManager implements IAudioManager {
     this.stopMusic();
     this.processedEventIds.clear();
     this.lastProcessedTick = -1;
+  }
+
+  public destroy(): void {
+    this.stopAll();
+    if (
+      typeof document !== 'undefined' &&
+      this.boundVisibilityChange
+    ) {
+      document.removeEventListener(
+        'visibilitychange',
+        this.boundVisibilityChange
+      );
+      this.boundVisibilityChange = null;
+    }
+    this.bufferCache.clear();
+    this.loadingPromises.clear();
+    this.failedPaths.clear();
+    const ctx = this.audioCtx;
+    this.audioCtx = null;
+    this.initialized = false;
+    try {
+      void ctx?.close?.().catch(() => {});
+    } catch {
+      // Ignore close errors
+    }
   }
 
   public getActiveChannelCount(): number {

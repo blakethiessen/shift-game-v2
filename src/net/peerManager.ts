@@ -108,8 +108,10 @@ const RELAY_SYN_RETRY_MS = 1000;
 const RELAY_MAX_BUFFERED_BYTES = 65536;
 const RELAY_MAX_CHUNK_CHARS = 8000;
 const CLOUD_RELAY_MIN_INTERVAL_MS = 100;
-const CLOUD_RELAY_INPUT_MIN_INTERVAL_MS = 50;
-const MAX_RELAY_UNAVAILABLE_ERRORS = 60;
+const CLOUD_RELAY_INPUT_MIN_INTERVAL_MS = 100;
+const RELAY_UNAVAILABLE_GRACE_MS = 10000;
+const WEBRTC_UPGRADE_GRACE_MS = 3000;
+const RELAY_MAX_CHUNK_PART_CHARS = RELAY_MAX_CHUNK_CHARS * 2;
 
 interface RelayEnvelope {
   kind: 'syn' | 'ack' | 'data' | 'chunk' | 'close';
@@ -282,8 +284,16 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
       if (isState || isInput) {
         let isDiscreteInputAction = false;
         if (isInput) {
-          const seqMatch = data.match(/"interactSeq":\d+.*"pingSeq":\d+/);
-          const seqSig = seqMatch ? seqMatch[0] : '';
+          // Match all sequence counters regardless of key ordering (including useItemSeq & pauseToggleSeq)
+          const seqSig = [
+            data.match(/"useItemSeq":\d+/)?.[0] ?? '',
+            data.match(/"interactSeq":\d+/)?.[0] ?? '',
+            data.match(/"inventoryCycleSeq":\d+/)?.[0] ?? '',
+            data.match(/"inventoryDropSeq":\d+/)?.[0] ?? '',
+            data.match(/"shiftRequestSeq":\d+/)?.[0] ?? '',
+            data.match(/"pingSeq":\d+/)?.[0] ?? '',
+            data.match(/"pauseToggleSeq":\d+/)?.[0] ?? '',
+          ].join('|');
           if (seqSig !== '' && seqSig !== this.lastInputSeqSig) {
             this.lastInputSeqSig = seqSig;
             isDiscreteInputAction = true;
@@ -442,6 +452,7 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
         !Number.isInteger(envelope.total) ||
         typeof envelope.part !== 'string' ||
         envelope.part.length === 0 ||
+        envelope.part.length > RELAY_MAX_CHUNK_PART_CHARS ||
         envelope.total <= 0 ||
         envelope.total > 64 ||
         envelope.index < 0 ||
@@ -489,13 +500,32 @@ class PeerSocketRelayConnection implements IDataConnectionLike {
     this.closeInternal(true);
   }
 
-  public closeQuietlyForUpgrade(): void {
+  public closeGracefullyForUpgrade(
+    onGracefulPacket?: (data: unknown) => void,
+    graceMs: number = WEBRTC_UPGRADE_GRACE_MS
+  ): void {
+    if (onGracefulPacket && this.hasPendingCloudData && this.open) {
+      this.dispatchWireData(this.mergePendingCloudEvents(this.pendingCloudData));
+    }
     this.clearCloudFlushTimer();
-    this.open = false;
     this.openListeners.clear();
-    this.dataListeners.clear();
     this.closeListeners.clear();
     this.errorListeners.clear();
+    if (!onGracefulPacket) {
+      this.open = false;
+      this.dataListeners.clear();
+      return;
+    }
+    this.dataListeners.clear();
+    this.dataListeners.add(onGracefulPacket);
+    setTimeout(() => {
+      this.open = false;
+      this.dataListeners.clear();
+    }, graceMs);
+  }
+
+  public closeQuietlyForUpgrade(): void {
+    this.closeGracefullyForUpgrade();
   }
 
   private clearCloudFlushTimer(): void {
@@ -745,6 +775,8 @@ export class PeerManager implements IPeerManager {
 
   private peer: IPeerLike | null = null;
   private dataConnection: IDataConnectionLike | null = null;
+  private pendingWebRtcConn: IDataConnectionLike | null = null;
+  private upgradeGraceRelayConn: PeerSocketRelayConnection | null = null;
   private roomCode: string | null = null;
   private connectionState: ConnectionState = 'disconnected';
   private rttMs = 0;
@@ -855,7 +887,7 @@ export class PeerManager implements IPeerManager {
           return true;
         };
 
-        let hostRelayUnavailableErrors = 0;
+        let hostRelayUnavailableStartMs: number | null = null;
 
         if (peerInstance.socket) {
           const socket = peerInstance.socket;
@@ -872,7 +904,7 @@ export class PeerManager implements IPeerManager {
               !this.dataConnection ||
               this.dataConnection.peer === srcPeerId
             ) {
-              hostRelayUnavailableErrors = 0;
+              hostRelayUnavailableStartMs = null;
             }
 
             if (envelope.kind === 'syn') {
@@ -918,6 +950,11 @@ export class PeerManager implements IPeerManager {
               this.dataConnection.peer === srcPeerId
             ) {
               this.dataConnection.receiveEnvelope(envelope);
+            } else if (
+              this.upgradeGraceRelayConn &&
+              this.upgradeGraceRelayConn.peer === srcPeerId
+            ) {
+              this.upgradeGraceRelayConn.receiveEnvelope(envelope);
             }
           });
         }
@@ -943,6 +980,7 @@ export class PeerManager implements IPeerManager {
               this.dataConnection.peer === conn.peer
             ) {
               // Allow direct WebRTC connection from same partner to upgrade the WS relay once open
+              this.stashPendingWebRtcConn(conn);
               this.watchWebRtcUpgrade(conn);
               return;
             }
@@ -1018,8 +1056,11 @@ export class PeerManager implements IPeerManager {
             if (!this.dataConnection?.isRelay) {
               return;
             }
-            hostRelayUnavailableErrors++;
-            if (hostRelayUnavailableErrors < MAX_RELAY_UNAVAILABLE_ERRORS) {
+            const nowMs = this.now();
+            if (hostRelayUnavailableStartMs === null) {
+              hostRelayUnavailableStartMs = nowMs;
+            }
+            if (nowMs - hostRelayUnavailableStartMs < RELAY_UNAVAILABLE_GRACE_MS) {
               return;
             }
           }
@@ -1090,7 +1131,11 @@ export class PeerManager implements IPeerManager {
         }
       };
 
-      if (this.joinTimeoutMs > 0) {
+      const scheduleJoinTimeout = (): void => {
+        this.clearJoinTimer();
+        if (this.joinTimeoutMs <= 0) {
+          return;
+        }
         this.joinTimerId = setTimeout(() => {
           if (!this.peer || settled) {
             return;
@@ -1108,7 +1153,8 @@ export class PeerManager implements IPeerManager {
             'Connection timed out — check room code or network/TURN relay'
           );
         }, this.joinTimeoutMs);
-      }
+      };
+      scheduleJoinTimeout();
 
       const startJoinAttempt = (useCloudServer: boolean): void => {
         let peerInstance: IPeerLike;
@@ -1127,6 +1173,7 @@ export class PeerManager implements IPeerManager {
         } catch (err) {
           if (!useCloudServer && !settled) {
             this.preferCloudServer = true;
+            scheduleJoinTimeout();
             startJoinAttempt(true);
             return;
           }
@@ -1155,6 +1202,7 @@ export class PeerManager implements IPeerManager {
           } catch {
             // Ignore destroy errors on failed same-origin peer
           }
+          scheduleJoinTimeout();
           startJoinAttempt(true);
           return true;
         };
@@ -1186,7 +1234,7 @@ export class PeerManager implements IPeerManager {
           }, RELAY_SYN_RETRY_MS);
         };
 
-        let relayUnavailableErrors = 0;
+        let relayUnavailableStartMs: number | null = null;
 
         if (peerInstance.socket) {
           const socket = peerInstance.socket;
@@ -1198,7 +1246,7 @@ export class PeerManager implements IPeerManager {
             if (!parsed || parsed.srcPeerId !== targetPeerId) {
               return;
             }
-            relayUnavailableErrors = 0;
+            relayUnavailableStartMs = null;
             const { envelope } = parsed;
 
             if (envelope.kind === 'ack') {
@@ -1221,6 +1269,11 @@ export class PeerManager implements IPeerManager {
               this.dataConnection.peer === targetPeerId
             ) {
               this.dataConnection.receiveEnvelope(envelope);
+            } else if (
+              this.upgradeGraceRelayConn &&
+              this.upgradeGraceRelayConn.peer === targetPeerId
+            ) {
+              this.upgradeGraceRelayConn.receiveEnvelope(envelope);
             }
           });
         }
@@ -1301,32 +1354,37 @@ export class PeerManager implements IPeerManager {
           }
 
           // Ignore signaling server drops once P2P DataChannel is already open,
-          // or reconnect signaling if using WS relay.
-          if (
-            NON_FATAL_SIGNALING_ERROR_TYPES.has(errType) &&
-            this.connectionState === 'connected' &&
-            this.dataConnection?.open
-          ) {
-            if (this.dataConnection.isRelay) {
-              this.tryReconnectPeer(peerInstance);
+          // or reconnect signaling during joining / WS relay.
+          if (NON_FATAL_SIGNALING_ERROR_TYPES.has(errType)) {
+            if (this.connectionState === 'connected' && this.dataConnection?.open) {
+              if (this.dataConnection.isRelay) {
+                this.tryReconnectPeer(peerInstance);
+              }
+              return;
             }
-            return;
+            if (!settled && peerOpened && this.joinTimerId !== null) {
+              this.tryReconnectPeer(peerInstance);
+              return;
+            }
           }
 
           // Ignore expired WebRTC OFFER/CANDIDATE notices once connected,
-          // or tolerate brief Host signaling reconnects on WS relay (< MAX_RELAY_UNAVAILABLE_ERRORS misses).
-          if (
-            errType === 'peer-unavailable' &&
-            settled &&
-            this.connectionState === 'connected' &&
-            this.dataConnection?.open
-          ) {
-            if (!this.dataConnection.isRelay) {
+          // or tolerate transientHost reconnects while join timer is active or during WS relay grace window.
+          if (errType === 'peer-unavailable') {
+            if (!settled && peerOpened && this.joinTimerId !== null && hasRelaySupport && this.relaySynIntervalId !== null) {
               return;
             }
-            relayUnavailableErrors++;
-            if (relayUnavailableErrors < MAX_RELAY_UNAVAILABLE_ERRORS) {
-              return;
+            if (settled && this.connectionState === 'connected' && this.dataConnection?.open) {
+              if (!this.dataConnection.isRelay) {
+                return;
+              }
+              const nowMs = this.now();
+              if (relayUnavailableStartMs === null) {
+                relayUnavailableStartMs = nowMs;
+              }
+              if (nowMs - relayUnavailableStartMs < RELAY_UNAVAILABLE_GRACE_MS) {
+                return;
+              }
             }
           }
 
@@ -1369,14 +1427,20 @@ export class PeerManager implements IPeerManager {
     }
   }
 
-  public onPacket(handler: (packet: NetPacket) => void): void {
+  public onPacket(handler: (packet: NetPacket) => void): () => void {
     this.packetHandlers.add(handler);
+    return () => {
+      this.packetHandlers.delete(handler);
+    };
   }
 
   public onStateChange(
     handler: (state: ConnectionState, error?: string) => void
-  ): void {
+  ): () => void {
     this.stateHandlers.add(handler);
+    return () => {
+      this.stateHandlers.delete(handler);
+    };
   }
 
   public getRoomCode(): string | null {
@@ -1398,6 +1462,19 @@ export class PeerManager implements IPeerManager {
   private closeActiveDataConnection(): void {
     const activeConn = this.dataConnection;
     this.dataConnection = null;
+    const pendingWebRtc = this.pendingWebRtcConn;
+    this.pendingWebRtcConn = null;
+    if (this.upgradeGraceRelayConn) {
+      this.upgradeGraceRelayConn.closeQuietlyForUpgrade();
+      this.upgradeGraceRelayConn = null;
+    }
+    if (pendingWebRtc && pendingWebRtc !== activeConn) {
+      try {
+        pendingWebRtc.close();
+      } catch {
+        // Ignore close errors
+      }
+    }
     if (activeConn) {
       try {
         activeConn.close();
@@ -1407,11 +1484,82 @@ export class PeerManager implements IPeerManager {
     }
   }
 
+  private handleIncomingData(rawData: unknown): void {
+    const packet = deserializePacket(rawData);
+    if (!packet) {
+      return;
+    }
+
+    if (packet.type === 'ping') {
+      this.sendPacket({
+        type: 'pong',
+        timestamp: packet.timestamp,
+      });
+    } else if (packet.type === 'pong') {
+      const elapsed = this.now() - packet.timestamp;
+      if (Number.isFinite(elapsed) && elapsed >= 0) {
+        this.rttMs = Math.round(elapsed);
+      }
+    }
+
+    for (const handler of Array.from(this.packetHandlers)) {
+      handler(packet);
+    }
+  }
+
+  private stashPendingWebRtcConn(conn: IDataConnectionLike): void {
+    if (this.pendingWebRtcConn && this.pendingWebRtcConn !== conn) {
+      try {
+        this.pendingWebRtcConn.close();
+      } catch {
+        // Ignore close errors on superseded pending WebRTC connection
+      }
+    }
+    this.pendingWebRtcConn = conn;
+  }
+
+  private closePendingWebRtcConn(exceptConn?: IDataConnectionLike): void {
+    const pending = this.pendingWebRtcConn;
+    if (!pending || pending === exceptConn) {
+      if (pending === exceptConn) {
+        this.pendingWebRtcConn = null;
+      }
+      return;
+    }
+    this.pendingWebRtcConn = null;
+    try {
+      pending.close();
+    } catch {
+      // Ignore close errors
+    }
+  }
+
   private attachDataConnection(
     conn: IDataConnectionLike,
     onConnected?: () => void,
     onConnectError?: (msg: string) => void
   ): void {
+    const prevConn = this.dataConnection;
+    const isIncomingRelay = conn instanceof PeerSocketRelayConnection;
+    if (prevConn && prevConn !== conn && !prevConn.open) {
+      if (
+        isIncomingRelay &&
+        !(prevConn instanceof PeerSocketRelayConnection) &&
+        prevConn.peer === conn.peer
+      ) {
+        // Keep same-peer negotiating WebRTC DataConnection alive so watchWebRtcUpgrade can finish
+        this.stashPendingWebRtcConn(prevConn);
+      } else {
+        try {
+          prevConn.close();
+        } catch {
+          // Ignore close errors on superseded pending connection
+        }
+      }
+    }
+    if (!isIncomingRelay) {
+      this.closePendingWebRtcConn(conn);
+    }
     this.dataConnection = conn;
     let everOpened = conn.open;
 
@@ -1436,26 +1584,7 @@ export class PeerManager implements IPeerManager {
         if (this.dataConnection !== conn) {
           return;
         }
-        const packet = deserializePacket(rawData);
-        if (!packet) {
-          return;
-        }
-
-        if (packet.type === 'ping') {
-          this.sendPacket({
-            type: 'pong',
-            timestamp: packet.timestamp,
-          });
-        } else if (packet.type === 'pong') {
-          const elapsed = this.now() - packet.timestamp;
-          if (Number.isFinite(elapsed) && elapsed >= 0) {
-            this.rttMs = Math.round(elapsed);
-          }
-        }
-
-        for (const handler of Array.from(this.packetHandlers)) {
-          handler(packet);
-        }
+        this.handleIncomingData(rawData);
       });
 
       conn.on('close', () => {
@@ -1468,6 +1597,7 @@ export class PeerManager implements IPeerManager {
         }
         this.stopPingLoop();
         this.dataConnection = null;
+        this.closePendingWebRtcConn();
         if (this.connectionState === 'joining' && onConnectError) {
           onConnectError('Data connection closed during join');
           return;
@@ -1537,7 +1667,11 @@ export class PeerManager implements IPeerManager {
         this.dataConnection instanceof PeerSocketRelayConnection &&
         this.dataConnection.peer === conn.peer
       ) {
-        this.dataConnection.closeQuietlyForUpgrade();
+        const relayConn = this.dataConnection;
+        this.upgradeGraceRelayConn = relayConn;
+        relayConn.closeGracefullyForUpgrade((rawData) => {
+          this.handleIncomingData(rawData);
+        });
         this.attachDataConnection(conn, onConnected);
       }
     });
@@ -1598,6 +1732,19 @@ export class PeerManager implements IPeerManager {
 
     const activeConn = this.dataConnection;
     this.dataConnection = null;
+    const pendingWebRtc = this.pendingWebRtcConn;
+    this.pendingWebRtcConn = null;
+    if (this.upgradeGraceRelayConn) {
+      this.upgradeGraceRelayConn.closeQuietlyForUpgrade();
+      this.upgradeGraceRelayConn = null;
+    }
+    if (pendingWebRtc && pendingWebRtc !== activeConn) {
+      try {
+        pendingWebRtc.close();
+      } catch {
+        // Ignore close errors
+      }
+    }
     if (activeConn) {
       try {
         activeConn.close();

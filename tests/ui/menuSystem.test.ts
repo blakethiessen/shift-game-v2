@@ -28,8 +28,20 @@ function createMockPeerManager(): IPeerManager & {
       stateHandlers.forEach((h) => h(connState));
     }),
     sendPacket: vi.fn(),
-    onPacket: vi.fn((h) => packetHandlers.push(h)),
-    onStateChange: vi.fn((h) => stateHandlers.push(h)),
+    onPacket: vi.fn((h) => {
+      packetHandlers.push(h);
+      return () => {
+        const idx = packetHandlers.indexOf(h);
+        if (idx >= 0) packetHandlers.splice(idx, 1);
+      };
+    }),
+    onStateChange: vi.fn((h) => {
+      stateHandlers.push(h);
+      return () => {
+        const idx = stateHandlers.indexOf(h);
+        if (idx >= 0) stateHandlers.splice(idx, 1);
+      };
+    }),
     getRoomCode: () => roomCode,
     getConnectionState: () => connState,
     getRttMs: () => rtt,
@@ -393,6 +405,7 @@ describe('MenuSystem', () => {
     let capturedPacketHandler: ((packet: NetPacket) => void) | null = null;
     peer.onPacket = vi.fn((h) => {
       capturedPacketHandler = h;
+      return () => {};
     });
 
     const onStartOnline = vi.fn();
@@ -436,6 +449,7 @@ describe('MenuSystem', () => {
     let capturedStateHandler: ((state: any, error?: string) => void) | null = null;
     peer.onStateChange = vi.fn((h) => {
       capturedStateHandler = h;
+      return () => {};
     });
 
     menu = new MenuSystem({
@@ -701,5 +715,184 @@ describe('MenuSystem', () => {
     expect(
       container.querySelector('[data-testid="copy-invite-btn"]')?.textContent
     ).toBe('COPY INVITE LINK');
+  });
+
+  it('toggles Start Menu selection on mouseenter without recreating button DOM nodes, preserves join input focus across pong/status updates, disables copyBtn without roomCode, ignores lobbySync on host/hidden, and unsubscribes peer listeners on destroy()', () => {
+    let packetHandlers: Array<(p: NetPacket) => void> = [];
+    let stateHandlers: Array<(s: ConnectionState, e?: string) => void> = [];
+    const customPeer: IPeerManager = {
+      hostRoom: vi.fn(async () => 'H9Z2K'),
+      joinRoom: vi.fn(async () => {}),
+      sendPacket: vi.fn(),
+      onPacket: vi.fn((h) => {
+        packetHandlers.push(h);
+        return () => {
+          packetHandlers = packetHandlers.filter((x) => x !== h);
+        };
+      }),
+      onStateChange: vi.fn((h) => {
+        stateHandlers.push(h);
+        return () => {
+          stateHandlers = stateHandlers.filter((x) => x !== h);
+        };
+      }),
+      getRoomCode: () => null,
+      getConnectionState: () => 'disconnected',
+      getRttMs: () => 42,
+      disconnect: vi.fn(),
+    };
+
+    const onLobbyConfigChange = vi.fn();
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: customPeer,
+      callbacks: { onLobbyConfigChange },
+    });
+    menu.showScreen('start');
+
+    // H-17: mouseenter on Start menu item toggles .is-selected without recreating <button> DOM nodes
+    const btnBefore = container.querySelector('[data-action="online"]') as HTMLButtonElement;
+    btnBefore.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    const btnAfter = container.querySelector('[data-action="online"]') as HTMLButtonElement;
+    expect(btnAfter).toBe(btnBefore);
+    expect(btnAfter.classList.contains('is-selected')).toBe(true);
+
+    // Go to Lobby Host tab: copyBtn must be disabled while roomCode is null, and H-15 incoming lobbySync must be ignored in Host tab
+    menu.showScreen('lobby');
+    const hostCopyBtn = container.querySelector('[data-testid="copy-invite-btn"]') as HTMLButtonElement;
+    expect(hostCopyBtn.disabled).toBe(true);
+
+    const bogusSync: NetPacket = {
+      type: 'lobbySync',
+      lobbyConfig: {
+        mode: 'online',
+        partnerVisibility: 'strict',
+        shiftMode: 'individual',
+        muffledCrossDimensionAudio: false,
+      },
+      hostReady: true,
+      clientReady: true,
+      startGame: true,
+    };
+    packetHandlers.forEach((h) => h(bogusSync));
+    expect(onLobbyConfigChange).not.toHaveBeenCalled();
+
+    // Switch to Join tab: label must link to #join-room-input, and pong/state updates must NOT steal focus or reset #join-room-input
+    const joinTabBtn = container.querySelector('[data-testid="lobby-tab-join"]') as HTMLButtonElement;
+    joinTabBtn.click();
+    const joinInput = container.querySelector('#join-room-input') as HTMLInputElement;
+    expect(joinInput).toBeTruthy();
+    const label = container.querySelector('label[for="join-room-input"]') as HTMLLabelElement;
+    expect(label).toBeTruthy();
+
+    joinInput.focus();
+    joinInput.value = 'ABC';
+    stateHandlers.forEach((h) => h('connected'));
+    packetHandlers.forEach((h) => h({ type: 'pong', timestamp: 1234 }));
+    expect(document.activeElement).toBe(joinInput);
+    expect(joinInput.value).toBe('ABC');
+    expect(container.querySelector('[data-testid="lobby-connection-status"]')?.textContent).toContain('42 ms');
+
+    // Ignoring lobbySync while screen is hidden (during gameplay)
+    menu.hide();
+    packetHandlers.forEach((h) => h(bogusSync));
+    expect(onLobbyConfigChange).not.toHaveBeenCalled();
+
+    // destroy() must remove peer handlers
+    expect(packetHandlers.length).toBe(1);
+    expect(stateHandlers.length).toBe(1);
+    menu.destroy();
+    expect(packetHandlers.length).toBe(0);
+    expect(stateHandlers.length).toBe(0);
+  });
+
+  it('renders connectionError and Host lobbySync rule updates while #join-room-input retains focus, and handles clipboard writeText rejection cleanly', async () => {
+    const packetHandlers: Array<(p: NetPacket) => void> = [];
+    const stateHandlers: Array<(s: ConnectionState, e?: string) => void> = [];
+    const customPeer: IPeerManager = {
+      hostRoom: vi.fn(async () => 'H9Z2K'),
+      joinRoom: vi.fn(async () => {}),
+      sendPacket: vi.fn(),
+      onPacket: vi.fn((h) => {
+        packetHandlers.push(h);
+        return () => {};
+      }),
+      onStateChange: vi.fn((h) => {
+        stateHandlers.push(h);
+        return () => {};
+      }),
+      getRoomCode: () => 'H9Z2K',
+      getConnectionState: () => 'hosting',
+      getRttMs: () => 20,
+      disconnect: vi.fn(),
+    };
+
+    const clipboardSpy = vi.fn(() => Promise.reject(new Error('NotAllowedError')));
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardSpy },
+    });
+
+    menu = new MenuSystem({
+      container,
+      audioManager: audio,
+      inputManager: input,
+      peerManager: customPeer,
+    });
+    menu.showScreen('lobby');
+
+    // Clipboard failure must not cause unhandled rejection or false COPIED! badge
+    const copyBtn = container.querySelector('[data-testid="copy-invite-btn"]') as HTMLButtonElement;
+    copyBtn.click();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(clipboardSpy).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="copy-invite-btn"]')?.textContent).toBe(
+      'COPY INVITE LINK'
+    );
+
+    // Switch to Join tab, type room code, submit via Enter keeping focus on #join-room-input
+    (container.querySelector('[data-testid="lobby-tab-join"]') as HTMLButtonElement).click();
+    const joinInput = container.querySelector('#join-room-input') as HTMLInputElement;
+    joinInput.focus();
+    joinInput.value = 'ABCDE';
+    joinInput.dispatchEvent(new Event('input', { bubbles: true }));
+    joinInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+
+    // Error state must appear and preserve input focus
+    stateHandlers.forEach((h) => h('error', 'Connection timed out'));
+    expect(document.activeElement).toBe(joinInput);
+    expect(container.textContent).toContain('Connection timed out');
+
+    // Connected clears error and incoming lobbySync updates all rule toggles in place
+    stateHandlers.forEach((h) => h('connected'));
+    expect(container.textContent).not.toContain('Connection timed out');
+
+    packetHandlers.forEach((h) =>
+      h({
+        type: 'lobbySync',
+        lobbyConfig: {
+          mode: 'online',
+          shiftMode: 'individual',
+          partnerVisibility: 'echo',
+          muffledCrossDimensionAudio: true,
+          testingMode: true,
+        },
+        hostReady: true,
+        clientReady: false,
+        startGame: false,
+      })
+    );
+    expect(document.activeElement).toBe(joinInput);
+    expect(container.querySelector('[data-testid="toggle-shift-mode"]')?.textContent).toContain(
+      'Individual'
+    );
+    expect(container.querySelector('[data-testid="toggle-partner-visibility"]')?.textContent).toContain(
+      'Echo'
+    );
+    expect(container.querySelector('[data-testid="toggle-testing-mode"]')?.textContent).toContain(
+      'On'
+    );
   });
 });

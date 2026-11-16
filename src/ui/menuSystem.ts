@@ -117,6 +117,8 @@ export class MenuSystem {
   private gamepadFocusActive = false;
   private unsubGamepadMenu?: () => void;
   private unsubGamepadBtn?: () => void;
+  private unsubPeerState?: () => void;
+  private unsubPeerPacket?: () => void;
 
   private readonly boundKeyDown: (e: KeyboardEvent) => void;
 
@@ -132,7 +134,7 @@ export class MenuSystem {
     this.container.appendChild(this.rootEl);
 
     if (this.peerManager) {
-      this.peerManager.onStateChange((state, err) => {
+      const stateUnsub = this.peerManager.onStateChange((state, err) => {
         this.connectionState = state;
         this.connectionError = err ?? null;
         this.roomCode = this.peerManager?.getRoomCode() ?? this.roomCode;
@@ -141,24 +143,45 @@ export class MenuSystem {
           this.broadcastLobbySync(false);
         }
         if (this.currentScreen === 'lobby') {
-          this.render();
-        }
-      });
-
-      this.peerManager.onPacket((packet: NetPacket) => {
-        if (packet.type === 'lobbySync') {
-          this.lobbyConfig = { ...packet.lobbyConfig };
-          this.callbacks.onLobbyConfigChange?.(this.getLobbyConfig());
-          if (packet.startGame && this.lobbyTab === 'join') {
-            this.hide();
-            this.callbacks.onStartOnlineGame?.(this.getLobbyConfig(), false);
-            return;
-          }
-          if (this.currentScreen === 'lobby') {
+          if (!this.updateLobbyStatusInPlaceIfInputFocused()) {
             this.render();
           }
         }
       });
+      if (typeof stateUnsub === 'function') {
+        this.unsubPeerState = stateUnsub;
+      }
+
+      const packetUnsub = this.peerManager.onPacket((packet: NetPacket) => {
+        if (packet.type === 'pong') {
+          this.rttMs = this.peerManager?.getRttMs() ?? this.rttMs;
+          if (this.currentScreen === 'lobby') {
+            this.updateLobbyStatusText();
+          }
+          return;
+        }
+        if (packet.type === 'lobbySync') {
+          if (
+            this.currentScreen !== 'lobby' ||
+            this.lobbyTab !== 'join'
+          ) {
+            return;
+          }
+          this.lobbyConfig = { ...packet.lobbyConfig };
+          this.callbacks.onLobbyConfigChange?.(this.getLobbyConfig());
+          if (packet.startGame) {
+            this.hide();
+            this.callbacks.onStartOnlineGame?.(this.getLobbyConfig(), false);
+            return;
+          }
+          if (!this.updateLobbyStatusInPlaceIfInputFocused()) {
+            this.render();
+          }
+        }
+      });
+      if (typeof packetUnsub === 'function') {
+        this.unsubPeerPacket = packetUnsub;
+      }
     }
 
     this.boundKeyDown = (e: KeyboardEvent) => this.handleKeyDown(e);
@@ -671,6 +694,7 @@ export class MenuSystem {
     innerFrame.className = 'menu-inner-frame';
 
     const labels = ['LOCAL CO-OP', 'ONLINE CO-OP', 'OPTIONS', 'CREDITS'];
+    const actions = ['local', 'online', 'options', 'credits'];
 
     labels.forEach((label, idx) => {
       const row = document.createElement('div');
@@ -685,8 +709,11 @@ export class MenuSystem {
 
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'menu-btn';
+      btn.className = `menu-btn${
+        this.selectedIndex === idx ? ' is-selected' : ''
+      }`;
       btn.textContent = label;
+      btn.setAttribute('data-action', actions[idx]);
       btn.setAttribute(
         'data-testid',
         `start-btn-${label.toLowerCase().replace(/\s+/g, '-')}`
@@ -696,7 +723,7 @@ export class MenuSystem {
         if (this.selectedIndex !== idx) {
           this.selectedIndex = idx;
           this.audioManager.playSound('menuCycle');
-          this.render();
+          this.updateStartMenuSelection();
         }
       });
 
@@ -800,8 +827,8 @@ export class MenuSystem {
       const codeBadge = document.createElement('div');
       codeBadge.className = 'room-code-badge';
       codeBadge.setAttribute('data-testid', 'lobby-room-code');
-      const displayCode =
-        this.roomCode ?? this.peerManager?.getRoomCode() ?? 'GENERATING...';
+      const resolvedRoomCode = this.roomCode ?? this.peerManager?.getRoomCode() ?? null;
+      const displayCode = resolvedRoomCode ?? 'GENERATING...';
       codeBadge.textContent = displayCode;
       connBox.appendChild(codeBadge);
 
@@ -809,31 +836,46 @@ export class MenuSystem {
       copyBtn.type = 'button';
       copyBtn.className = 'action-btn';
       copyBtn.setAttribute('data-testid', 'copy-invite-btn');
+      copyBtn.disabled = !resolvedRoomCode;
       copyBtn.textContent = this.copyFeedback
         ? 'COPIED!'
         : 'COPY INVITE LINK';
       copyBtn.addEventListener('click', () => {
+        if (!resolvedRoomCode) return;
         this.audioManager.playSound('menuSelect');
         const origin =
           typeof window !== 'undefined' ? window.location.origin : '';
         const pathname =
           typeof window !== 'undefined' ? window.location.pathname : '/';
         const inviteUrl = `${origin}${pathname}?room=${encodeURIComponent(
-          displayCode
+          resolvedRoomCode
         )}`;
-        if (
-          typeof navigator !== 'undefined' &&
-          navigator.clipboard?.writeText
-        ) {
-          void navigator.clipboard.writeText(inviteUrl);
+        const writePromise =
+          typeof navigator !== 'undefined'
+            ? navigator.clipboard?.writeText?.(inviteUrl)
+            : undefined;
+        if (writePromise && typeof writePromise.then === 'function') {
+          void writePromise.then(
+            () => {
+              this.copyFeedback = true;
+              if (this.currentScreen === 'lobby' && this.lobbyTab === 'host') {
+                this.render();
+              }
+            },
+            () => {
+              // Ignore clipboard permission denial without unhandled rejection
+            }
+          );
+        } else {
+          this.copyFeedback = true;
+          this.render();
         }
-        this.copyFeedback = true;
-        this.render();
       });
       connBox.appendChild(copyBtn);
     } else {
       const joinTitle = document.createElement('label');
       joinTitle.className = 'menu-header-small';
+      joinTitle.htmlFor = 'join-room-input';
       joinTitle.textContent = 'Enter Partner Room Code';
       connBox.appendChild(joinTitle);
 
@@ -843,6 +885,7 @@ export class MenuSystem {
       inputRow.style.alignItems = 'center';
 
       const codeInput = document.createElement('input');
+      codeInput.id = 'join-room-input';
       codeInput.type = 'text';
       codeInput.className = 'lobby-input';
       codeInput.setAttribute('data-testid', 'join-room-input');
@@ -906,12 +949,15 @@ export class MenuSystem {
     }`;
     connBox.appendChild(statusLine);
 
+    const errEl = document.createElement('div');
+    errEl.setAttribute('data-testid', 'lobby-connection-error');
+    errEl.style.color = '#ff4d4f';
     if (this.connectionError) {
-      const errEl = document.createElement('div');
-      errEl.style.color = '#ff4d4f';
       errEl.textContent = this.connectionError;
-      connBox.appendChild(errEl);
+    } else {
+      errEl.style.display = 'none';
     }
+    connBox.appendChild(errEl);
 
     grid.appendChild(connBox);
 
@@ -1605,7 +1651,83 @@ export class MenuSystem {
     this.rootEl.appendChild(banner);
   }
 
+  private updateStartMenuSelection(): void {
+    const rows = this.rootEl.querySelectorAll('.menu-item-row');
+    rows.forEach((row, idx) => {
+      const selected = idx === this.selectedIndex;
+      row.classList.toggle('is-selected', selected);
+      row.querySelector('.menu-btn')?.classList.toggle('is-selected', selected);
+    });
+  }
+
+  private formatLobbyStatusText(): string {
+    const rttVal = this.peerManager?.getRttMs() ?? this.rttMs;
+    return `Status: ${this.connectionState.toUpperCase()}${
+      this.connectionState === 'connected' ? ` (${rttVal} ms)` : ''
+    }`;
+  }
+
+  private updateLobbyStatusText(): void {
+    const statusLine = this.rootEl.querySelector(
+      '[data-testid="lobby-connection-status"]'
+    );
+    if (statusLine) {
+      statusLine.textContent = this.formatLobbyStatusText();
+    }
+  }
+
+  private updateLobbyStatusInPlaceIfInputFocused(): boolean {
+    if (typeof document === 'undefined') return false;
+    const active = document.activeElement as HTMLElement | null;
+    if (active && active.id === 'join-room-input') {
+      this.updateLobbyStatusText();
+      const errEl = this.rootEl.querySelector(
+        '[data-testid="lobby-connection-error"]'
+      ) as HTMLElement | null;
+      if (errEl) {
+        if (this.connectionError) {
+          errEl.textContent = this.connectionError;
+          errEl.style.display = '';
+        } else {
+          errEl.textContent = '';
+          errEl.style.display = 'none';
+        }
+      }
+      const shiftBtn = this.rootEl.querySelector(
+        '[data-testid="toggle-shift-mode"]'
+      );
+      if (shiftBtn) {
+        shiftBtn.textContent =
+          this.lobbyConfig.shiftMode === 'cooperative'
+            ? 'Cooperative (Default)'
+            : 'Individual (Cooldown)';
+      }
+      const visBtn = this.rootEl.querySelector(
+        '[data-testid="toggle-partner-visibility"]'
+      );
+      if (visBtn) {
+        visBtn.textContent =
+          this.lobbyConfig.partnerVisibility === 'strict'
+            ? 'Strict Blind (Default)'
+            : 'Faint Partner Echo';
+      }
+      const testBtn = this.rootEl.querySelector(
+        '[data-testid="toggle-testing-mode"]'
+      );
+      if (testBtn) {
+        const isOn = Boolean(
+          this.lobbyConfig.testingMode ?? this.callbacks.getTestingMode?.()
+        );
+        testBtn.textContent = isOn ? 'On (No Darkness + HP)' : 'Off';
+      }
+      return true;
+    }
+    return false;
+  }
+
   public destroy(): void {
+    this.unsubPeerState?.();
+    this.unsubPeerPacket?.();
     this.unsubGamepadMenu?.();
     this.unsubGamepadBtn?.();
     if (typeof window !== 'undefined') {

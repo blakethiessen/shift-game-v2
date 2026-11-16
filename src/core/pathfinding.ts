@@ -47,6 +47,45 @@ export function isTileInBounds(x: number, y: number): boolean {
   return x >= 0 && x < DIM_WIDTH_TILES && y >= 0 && y < DIM_HEIGHT_TILES;
 }
 
+export function hasFloorTiles(grid: WorldGridState): boolean {
+  for (let col = 0; col < grid.cells.length; col++) {
+    const column = grid.cells[col];
+    if (!column) continue;
+    for (let row = 0; row < column.length; row++) {
+      const cell = column[row];
+      if (cell && (cell.floorGid > 0 || cell.wallOverlayGid > 0)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function hasDoorAtTile(
+  grid: WorldGridState,
+  x: number,
+  y: number
+): boolean {
+  return grid.doors.some(
+    (d) =>
+      Math.floor(d.x / TILE_SIZE_PX) === x &&
+      Math.floor(d.y / TILE_SIZE_PX) === y
+  );
+}
+
+export function isVoidTile(
+  grid: WorldGridState,
+  x: number,
+  y: number,
+  gridHasFloor: boolean = hasFloorTiles(grid)
+): boolean {
+  if (!gridHasFloor) return false;
+  const cell = grid.cells[x]?.[y];
+  if (!cell) return true;
+  if (cell.floorGid > 0 || cell.wallOverlayGid > 0) return false;
+  return !hasDoorAtTile(grid, x, y);
+}
+
 export function isTileBlocked(
   grid: WorldGridState,
   x: number,
@@ -65,14 +104,11 @@ export function isTileBlocked(
   ) {
     return true;
   }
-  // Check for closed/locked door on this tile
-  const hasLockedDoor = grid.doors.some(
-    (d) =>
-      Math.floor(d.x / TILE_SIZE_PX) === x &&
-      Math.floor(d.y / TILE_SIZE_PX) === y &&
-      !d.unlocked
-  );
-  if (hasLockedDoor) {
+  // Block ALL doors (locked or unlocked) and exterior void cells in A*/knockback/drop
+  if (hasDoorAtTile(grid, x, y)) {
+    return true;
+  }
+  if (isVoidTile(grid, x, y)) {
     return true;
   }
   return false;

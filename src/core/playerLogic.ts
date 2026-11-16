@@ -37,7 +37,15 @@ import {
   getDefaultItemGid,
   getDefaultItemPopUpText,
 } from './levelParser';
-import { findPath, isTileBlocked, isTileInBounds } from './pathfinding';
+import {
+  findNearestFreeTile,
+  findPath,
+  hasDoorAtTile,
+  hasFloorTiles,
+  isTileBlocked,
+  isTileInBounds,
+  isVoidTile,
+} from './pathfinding';
 import { knockbackBlobby, shrinkTear } from './monstersAndTears';
 import {
   isPlayerTouchingDoor,
@@ -105,10 +113,17 @@ export function doesPlayerCollideWithWalls(
     Math.floor((bottom - 0.001) / TILE_SIZE_PX)
   );
 
+  const gridHasFloor = hasFloorTiles(grid);
   for (let tx = minTileX; tx <= maxTileX; tx++) {
     for (let ty = minTileY; ty <= maxTileY; ty++) {
       const cell = grid.cells[tx]?.[ty];
-      if (!cell || cell.collides || cell.isHole || cell.isWallDoor) {
+      if (
+        !cell ||
+        cell.collides ||
+        cell.isHole ||
+        cell.isWallDoor ||
+        isVoidTile(grid, tx, ty, gridHasFloor)
+      ) {
         return true;
       }
     }
@@ -168,6 +183,10 @@ function isLinearSegmentClear(
     ) {
       return false;
     }
+    // Prevent coalesced jumps from tunneling cleanly past a BoxEntity
+    if (i < steps && findOverlappingBoxes(grid, sx, sy).length > 0) {
+      return false;
+    }
   }
   return true;
 }
@@ -203,16 +222,17 @@ function canMoveDirectlyWithClientSync(
   return false;
 }
 
-export function findOverlappingBox(
+export function findOverlappingBoxes(
   grid: WorldGridState,
   x: number,
   y: number
-): BoxEntity | null {
+): BoxEntity[] {
   const left = x + PLAYER_HITBOX_MIN;
   const right = x + PLAYER_HITBOX_MAX;
   const top = y + PLAYER_HITBOX_MIN;
   const bottom = y + PLAYER_HITBOX_MAX;
 
+  const overlapping: BoxEntity[] = [];
   for (const box of grid.boxes) {
     if (
       rectsOverlap(
@@ -226,10 +246,18 @@ export function findOverlappingBox(
         box.y + BOX_HITBOX_MAX
       )
     ) {
-      return box;
+      overlapping.push(box);
     }
   }
-  return null;
+  return overlapping;
+}
+
+export function findOverlappingBox(
+  grid: WorldGridState,
+  x: number,
+  y: number
+): BoxEntity | null {
+  return findOverlappingBoxes(grid, x, y)[0] ?? null;
 }
 
 export function doesBoxCollide(
@@ -257,10 +285,17 @@ export function doesBoxCollide(
     Math.floor((bottom - 0.001) / TILE_SIZE_PX)
   );
 
+  const gridHasFloor = hasFloorTiles(grid);
   for (let tx = minTileX; tx <= maxTileX; tx++) {
     for (let ty = minTileY; ty <= maxTileY; ty++) {
       const cell = grid.cells[tx]?.[ty];
-      if (!cell || cell.collides || cell.isHole || cell.isWallDoor) {
+      if (
+        !cell ||
+        cell.collides ||
+        cell.isHole ||
+        cell.isWallDoor ||
+        isVoidTile(grid, tx, ty, gridHasFloor)
+      ) {
         return true;
       }
     }
@@ -391,6 +426,45 @@ export function isWithinTileRange(
   return euclidean <= rangeTiles || chebyshev <= rangeTiles;
 }
 
+function getObjectInteractionMatch(
+  player: PlayerState,
+  grid: WorldGridState,
+  targetX: number,
+  targetY: number,
+  includeTallPole: boolean = false
+): { faceDir: Direction; tier: number } {
+  const checkTarget = (
+    tx: number,
+    ty: number,
+    diagonalPenalty: number
+  ): { faceDir: Direction; tier: number } => {
+    const faceDir = nextToAndFace(player, tx, ty);
+    if (faceDir === Direction.None) {
+      return { faceDir: Direction.None, tier: 99 };
+    }
+    const pTile = localPixelToTile(player.x, player.y);
+    const tTile = localPixelToTile(tx, ty);
+    const manhattan = Math.abs(tTile.x - pTile.x) + Math.abs(tTile.y - pTile.y);
+    return { faceDir, tier: manhattan + diagonalPenalty };
+  };
+
+  const direct = checkTarget(targetX, targetY, 0);
+  if (!includeTallPole) {
+    return direct;
+  }
+
+  // Tall lamps (and EvilLamps) occupy head (x, y) plus a colliding pole directly below at (x, y + 25)
+  const col = Math.floor(targetX / TILE_SIZE_PX);
+  const poleRow = Math.floor(targetY / TILE_SIZE_PX) + 1;
+  if (grid.cells[col]?.[poleRow]?.collides) {
+    const viaPole = checkTarget(targetX, targetY + TILE_SIZE_PX, 1);
+    if (viaPole.tier < direct.tier) {
+      return viaPole;
+    }
+  }
+  return direct;
+}
+
 function pushPlayerAlongPath(
   state: GameState,
   pushedPlayer: PlayerState,
@@ -406,13 +480,40 @@ function pushPlayerAlongPath(
     return false;
   }
 
-  const distancePushed = Math.max(
-    1,
-    Math.floor((path.length - 1) / (pushedPlayer.speed * 3))
+  const distancePushed = Math.floor(
+    (path.length - 1) / (pushedPlayer.speed * 3)
   );
-  const idx = Math.min(path.length - 1, distancePushed);
-  pushedPlayer.x = path[idx].x * TILE_SIZE_PX;
-  pushedPlayer.y = path[idx].y * TILE_SIZE_PX;
+  const idx = Math.max(0, Math.min(path.length - 1, distancePushed));
+
+  const isTileClearForPush = (coord: TileCoord): boolean => {
+    const px = coord.x * TILE_SIZE_PX;
+    const py = coord.y * TILE_SIZE_PX;
+    return (
+      !hasDoorAtTile(grid, coord.x, coord.y) &&
+      findOverlappingBoxes(grid, px, py).length === 0 &&
+      !doesPlayerCollideWithWalls(grid, px, py)
+    );
+  };
+
+  let dest: TileCoord | null = null;
+  for (let j = idx; j >= 0; j--) {
+    if (isTileClearForPush(path[j])) {
+      dest = path[j];
+      break;
+    }
+  }
+  if (!dest) {
+    const fallback = findNearestFreeTile(grid, path[idx], grid.boxes);
+    if (isTileClearForPush(fallback)) {
+      dest = fallback;
+    }
+  }
+  if (!dest) {
+    return false;
+  }
+
+  pushedPlayer.x = dest.x * TILE_SIZE_PX;
+  pushedPlayer.y = dest.y * TILE_SIZE_PX;
   return true;
 }
 
@@ -636,16 +737,17 @@ function updatePlayerInteractableHover(
     }
   }
 
-  // 2. Adjacent & facing interactable world objects
+  // 2. Adjacent & facing interactable world objects (prioritizing same-tile > orthogonal > diagonal)
   const candidates: Array<{
     id: string;
     x: number;
     y: number;
     popUpText: string;
+    isTallLamp?: boolean;
   }> = [
     ...grid.doors,
-    ...grid.lamps,
-    ...grid.evilLamps,
+    ...grid.lamps.map((l) => ({ ...l, isTallLamp: true })),
+    ...grid.evilLamps.map((el) => ({ ...el, isTallLamp: true })),
     ...grid.pressurePlates,
     ...grid.levers,
     ...grid.chests,
@@ -654,14 +756,40 @@ function updatePlayerInteractableHover(
     ...grid.books,
   ];
 
+  let bestMatch: {
+    id: string;
+    popUpText: string;
+    faceDir: Direction;
+    tier: number;
+  } | null = null;
+
   for (const obj of candidates) {
-    const faceDir = nextToAndFace(player, obj.x, obj.y);
-    if (faceDir !== Direction.None) {
-      player.interactingObjectId = obj.id;
-      player.activePopupText = obj.popUpText;
-      player.popupFaceDirection = faceDir;
-      return;
+    const match = getObjectInteractionMatch(
+      player,
+      grid,
+      obj.x,
+      obj.y,
+      Boolean(obj.isTallLamp)
+    );
+    if (
+      match.faceDir !== Direction.None &&
+      (!bestMatch || match.tier < bestMatch.tier)
+    ) {
+      bestMatch = {
+        id: obj.id,
+        popUpText: obj.popUpText,
+        faceDir: match.faceDir,
+        tier: match.tier,
+      };
+      if (match.tier === 0) break;
     }
+  }
+
+  if (bestMatch) {
+    player.interactingObjectId = bestMatch.id;
+    player.activePopupText = bestMatch.popUpText;
+    player.popupFaceDirection = bestMatch.faceDir;
+    return;
   }
 
   player.interactingObjectId = null;
@@ -730,28 +858,60 @@ function handlePlayerInteract(
     return;
   }
 
-  // 2. Check Lamp / EvilLamp toggle
-  for (const lamp of grid.lamps) {
+  // 2. Check closest Lamp / EvilLamp / Lever interaction (supporting tall lamps from below pole)
+  const actionCandidates: Array<
+    | { kind: 'lamp'; target: (typeof grid.lamps)[number]; x: number; y: number }
+    | {
+        kind: 'evilLamp';
+        target: (typeof grid.evilLamps)[number];
+        x: number;
+        y: number;
+      }
+    | { kind: 'lever'; target: (typeof grid.levers)[number]; x: number; y: number }
+  > = [
+    ...grid.lamps
+      .filter((l) => !l.isBroken)
+      .map((target) => ({ kind: 'lamp' as const, target, x: target.x, y: target.y })),
+    ...grid.evilLamps.map((target) => ({
+      kind: 'evilLamp' as const,
+      target,
+      x: target.x,
+      y: target.y,
+    })),
+    ...grid.levers.map((target) => ({
+      kind: 'lever' as const,
+      target,
+      x: target.x,
+      y: target.y,
+    })),
+  ];
+
+  let bestAction: {
+    entry: (typeof actionCandidates)[number];
+    tier: number;
+  } | null = null;
+  for (const entry of actionCandidates) {
+    const match = getObjectInteractionMatch(
+      player,
+      grid,
+      entry.x,
+      entry.y,
+      entry.kind !== 'lever'
+    );
     if (
-      !lamp.isBroken &&
-      nextToAndFace(player, lamp.x, lamp.y) !== Direction.None
+      match.faceDir !== Direction.None &&
+      (!bestAction || match.tier < bestAction.tier)
     ) {
-      toggleLamp(state, lamp);
-      return;
-    }
-  }
-  for (const evilLamp of grid.evilLamps) {
-    if (nextToAndFace(player, evilLamp.x, evilLamp.y) !== Direction.None) {
-      toggleLamp(state, evilLamp);
-      return;
+      bestAction = { entry, tier: match.tier };
+      if (match.tier === 0) break;
     }
   }
 
-  // 3. Check Lever toggle
-  for (const lever of grid.levers) {
-    if (nextToAndFace(player, lever.x, lever.y) !== Direction.None) {
-      toggleLever(state, lever, player);
-      return;
+  if (bestAction) {
+    if (bestAction.entry.kind === 'lever') {
+      toggleLever(state, bestAction.entry.target, player);
+    } else {
+      toggleLamp(state, bestAction.entry.target);
     }
   }
 }
@@ -939,9 +1099,13 @@ function handleUseCurrentItem(
     case 'Broom':
     case 'FryingPan':
     case 'Plunger': {
-      if (player.attackState.active && player.attackState.timerMs > 0) {
+      if (
+        (player.attackCooldownMs ?? 0) > 0 ||
+        (player.attackState.active && player.attackState.timerMs > 0)
+      ) {
         return;
       }
+      player.attackCooldownMs = 500;
       player.attackState = {
         active: true,
         weapon: currentItem.type,
@@ -1007,6 +1171,19 @@ function handleUseCurrentItem(
             y: door.y,
           });
         }
+        // Keep paired two-way LockedDoor shortcut unlocked from destination room too (e.g. spawnHallway <-> spawnRoom)
+        if (door.kind === 'LockedDoor' && door.connectedRoom && door.connectedDoorPos) {
+          const destPersist = state.persistence[door.connectedRoom];
+          const [cx, cy] = door.connectedDoorPos;
+          if (
+            destPersist &&
+            !destPersist.unlockedDoorCoords.some(
+              (u) => u.world === world && u.x === cx && u.y === cy
+            )
+          ) {
+            destPersist.unlockedDoorCoords.push({ world, x: cx, y: cy });
+          }
+        }
 
         emitEvent(state, {
           type: 'playSound',
@@ -1023,11 +1200,8 @@ function handleUseCurrentItem(
     case 'RedGem':
     case 'BlueGem':
     case 'GreenGem': {
-      const allStatues = [
-        ...state.room.worlds.neutral.statues,
-        ...state.room.worlds.dangerous.statues,
-      ];
-      const nearbyStatue = allStatues.find(
+      // Statues belong to a specific world (choiceRoom statue exists only in neutral)
+      const nearbyStatue = grid.statues.find(
         (s) =>
           s.id === player.interactingObjectId ||
           nextToAndFace(player, s.x, s.y) !== Direction.None ||
@@ -1035,6 +1209,18 @@ function handleUseCurrentItem(
       );
       if (!nearbyStatue) return;
 
+      if (
+        (currentItem.type === 'RedGem' && nearbyStatue.hasRedGem) ||
+        (currentItem.type === 'BlueGem' && nearbyStatue.hasBlueGem) ||
+        (currentItem.type === 'GreenGem' && nearbyStatue.hasGreenGem)
+      ) {
+        return;
+      }
+
+      const allStatues = [
+        ...state.room.worlds.neutral.statues,
+        ...state.room.worlds.dangerous.statues,
+      ];
       for (const statue of allStatues) {
         if (currentItem.type === 'RedGem') statue.hasRedGem = true;
         if (currentItem.type === 'BlueGem') statue.hasBlueGem = true;
@@ -1166,6 +1352,77 @@ export interface PlayerSeqTracker {
   pingSeq: number;
 }
 
+function resolveBoxPushAxis(
+  player: PlayerState,
+  grid: WorldGridState,
+  otherGrid: WorldGridState,
+  otherPlayer: PlayerState,
+  axis: 'x' | 'y',
+  prevCoord: number,
+  isClientSync: boolean
+): boolean {
+  const overlapped = findOverlappingBoxes(grid, player.x, player.y);
+  if (overlapped.length === 0) return false;
+
+  let delta = player[axis] - prevCoord;
+  let fallbackCoord = prevCoord;
+
+  if (isClientSync && overlapped.length === 1) {
+    const box = overlapped[0];
+    const min = player[axis] + PLAYER_HITBOX_MIN;
+    const max = player[axis] + PLAYER_HITBOX_MAX;
+    const prevMin = prevCoord + PLAYER_HITBOX_MIN;
+    const prevMax = prevCoord + PLAYER_HITBOX_MAX;
+    const boxMin = box[axis] + BOX_HITBOX_MIN;
+    const boxMax = box[axis] + BOX_HITBOX_MAX;
+    const wasOverlapping = prevMin < boxMax && prevMax > boxMin;
+    if (!wasOverlapping && max > boxMin && min < boxMax) {
+      const contactCoord =
+        player[axis] >= prevCoord
+          ? boxMin - PLAYER_HITBOX_MAX
+          : boxMax - PLAYER_HITBOX_MIN;
+      fallbackCoord = contactCoord;
+      delta =
+        player[axis] >= prevCoord
+          ? Math.max(0, player[axis] - Math.max(prevCoord, contactCoord))
+          : Math.min(0, player[axis] - Math.min(prevCoord, contactCoord));
+    }
+  }
+
+  if (delta === 0) {
+    player[axis] = fallbackCoord;
+    return true;
+  }
+
+  const moved: Array<{ box: BoxEntity; linked: BoxEntity | undefined }> = [];
+  for (const box of overlapped) {
+    const linked = otherGrid.boxes.find((b) => b.id === box.linkedBoxId);
+    box[axis] += delta;
+    if (linked) linked[axis] += delta;
+    moved.push({ box, linked });
+  }
+
+  let blocked = false;
+  for (const { box, linked } of moved) {
+    if (
+      doesBoxCollide(grid, box) ||
+      (linked ? doesBoxCollide(otherGrid, linked, otherPlayer) : false)
+    ) {
+      blocked = true;
+      break;
+    }
+  }
+
+  if (blocked) {
+    for (const { box, linked } of moved) {
+      box[axis] -= delta;
+      if (linked) linked[axis] -= delta;
+    }
+    player[axis] = fallbackCoord;
+  }
+  return true;
+}
+
 export function updateSinglePlayer(
   state: GameState,
   playerIndex: 0 | 1,
@@ -1199,11 +1456,17 @@ export function updateSinglePlayer(
     player.regenTimerMs = 0;
   }
 
-  // 2. Inventory display timer & ping timer
+  // 2. Inventory display timer, weapon cooldown & ping timer
   if (player.inventoryDisplayTimerMs > 0) {
     player.inventoryDisplayTimerMs = Math.max(
       0,
       player.inventoryDisplayTimerMs - dtMs
+    );
+  }
+  if ((player.attackCooldownMs ?? 0) > 0) {
+    player.attackCooldownMs = Math.max(
+      0,
+      (player.attackCooldownMs ?? 0) - dtMs
     );
   }
   if (player.ping && player.ping.active) {
@@ -1260,21 +1523,31 @@ export function updateSinglePlayer(
 
   if (shouldMoveStep) {
     if (player.isMoving) {
-      // Cancel active weapon swing when walking (matches legacy player.js)
+      // Cancel active weapon swing when walking (matches legacy player.js; attackCooldownMs still limits hit rate)
       player.attackState.active = false;
       player.attackState.timerMs = 0;
       player.attackState.weapon = null;
       player.attackState.hasDealtKnockback = false;
     }
 
+    let pushedAnyBox = false;
     if (
       clientSync &&
       canMoveDirectlyWithClientSync(grid, oldX, oldY, targetNextX, targetNextY)
     ) {
+      const prevX = player.x;
       player.x = targetNextX;
+      if (resolveBoxPushAxis(player, grid, otherGrid, otherPlayer, 'x', prevX, true)) {
+        pushedAnyBox = true;
+      }
+      const prevY = player.y;
       player.y = targetNextY;
+      if (resolveBoxPushAxis(player, grid, otherGrid, otherPlayer, 'y', prevY, true)) {
+        pushedAnyBox = true;
+      }
     } else {
-      // X-axis step
+      // X-axis step + per-axis multi-box push resolution
+      const prevX = player.x;
       const nextX = targetNextX;
       const hitDoorX = findCollidingDoor(grid, nextX, player.y);
       if (hitDoorX) {
@@ -1286,9 +1559,13 @@ export function updateSinglePlayer(
           : !doesPlayerCollideWithWalls(grid, nextX, player.y)
       ) {
         player.x = nextX;
+        if (resolveBoxPushAxis(player, grid, otherGrid, otherPlayer, 'x', prevX, Boolean(clientSync))) {
+          pushedAnyBox = true;
+        }
       }
 
-      // Y-axis step
+      // Y-axis step + per-axis multi-box push resolution
+      const prevY = player.y;
       const nextY = targetNextY;
       const hitDoorY = findCollidingDoor(grid, player.x, nextY);
       if (hitDoorY) {
@@ -1300,90 +1577,12 @@ export function updateSinglePlayer(
           : !doesPlayerCollideWithWalls(grid, player.x, nextY)
       ) {
         player.y = nextY;
+        if (resolveBoxPushAxis(player, grid, otherGrid, otherPlayer, 'y', prevY, Boolean(clientSync))) {
+          pushedAnyBox = true;
+        }
       }
     }
-
-    // Linked cross-dimension Box pushing
-    const overlappedBox = findOverlappingBox(grid, player.x, player.y);
-    if (overlappedBox) {
-      player.boxColliding = true;
-      let dx = player.x - oldX;
-      let dy = player.y - oldY;
-      let blockedFallbackX = oldX;
-      let blockedFallbackY = oldY;
-
-      if (clientSync) {
-        const wasOverlappingX =
-          oldX + PLAYER_HITBOX_MIN < overlappedBox.x + BOX_HITBOX_MAX &&
-          oldX + PLAYER_HITBOX_MAX > overlappedBox.x + BOX_HITBOX_MIN;
-        const wasOverlappingY =
-          oldY + PLAYER_HITBOX_MIN < overlappedBox.y + BOX_HITBOX_MAX &&
-          oldY + PLAYER_HITBOX_MAX > overlappedBox.y + BOX_HITBOX_MIN;
-
-        if (!wasOverlappingX) {
-          const contactX =
-            player.x >= oldX
-              ? overlappedBox.x + BOX_HITBOX_MIN - PLAYER_HITBOX_MAX
-              : overlappedBox.x + BOX_HITBOX_MAX - PLAYER_HITBOX_MIN;
-          blockedFallbackX = contactX;
-          dx =
-            player.x >= oldX
-              ? Math.max(0, player.x - Math.max(oldX, contactX))
-              : Math.min(0, player.x - Math.min(oldX, contactX));
-          if (wasOverlappingY) {
-            dy = 0;
-          }
-        }
-        if (!wasOverlappingY) {
-          const contactY =
-            player.y >= oldY
-              ? overlappedBox.y + BOX_HITBOX_MIN - PLAYER_HITBOX_MAX
-              : overlappedBox.y + BOX_HITBOX_MAX - PLAYER_HITBOX_MIN;
-          blockedFallbackY = contactY;
-          dy =
-            player.y >= oldY
-              ? Math.max(0, player.y - Math.max(oldY, contactY))
-              : Math.min(0, player.y - Math.min(oldY, contactY));
-          if (wasOverlappingX) {
-            dx = 0;
-          }
-        }
-      }
-
-      const linkedBox = otherGrid.boxes.find(
-        (b) => b.id === overlappedBox.linkedBoxId
-      );
-
-      if (dx !== 0) {
-        overlappedBox.x += dx;
-        if (linkedBox) linkedBox.x += dx;
-
-        const blocked =
-          doesBoxCollide(grid, overlappedBox) ||
-          (linkedBox ? doesBoxCollide(otherGrid, linkedBox, otherPlayer) : false);
-        if (blocked) {
-          overlappedBox.x -= dx;
-          if (linkedBox) linkedBox.x -= dx;
-          player.x = blockedFallbackX;
-        }
-      }
-
-      if (dy !== 0) {
-        overlappedBox.y += dy;
-        if (linkedBox) linkedBox.y += dy;
-
-        const blocked =
-          doesBoxCollide(grid, overlappedBox) ||
-          (linkedBox ? doesBoxCollide(otherGrid, linkedBox, otherPlayer) : false);
-        if (blocked) {
-          overlappedBox.y -= dy;
-          if (linkedBox) linkedBox.y -= dy;
-          player.y = blockedFallbackY;
-        }
-      }
-    } else {
-      player.boxColliding = false;
-    }
+    player.boxColliding = pushedAnyBox;
   } else {
     player.velocity = { x: 0, y: 0 };
     if (player.attackState.active && player.attackState.timerMs > 0) {
@@ -1531,9 +1730,8 @@ export function updateLocalPlayerMovementAndHover(
     player.attackState.weapon = null;
     player.attackState.hasDealtKnockback = false;
 
-    const oldX = player.x;
-    const oldY = player.y;
-
+    let pushedAnyBox = false;
+    const prevX = player.x;
     const nextX = player.x + player.velocity.x;
     const hitDoorX = findCollidingDoor(grid, nextX, player.y);
     if (hitDoorX) {
@@ -1541,8 +1739,12 @@ export function updateLocalPlayerMovementAndHover(
       player.atDoorId = hitDoorX.id;
     } else if (!doesPlayerCollideWithWalls(grid, nextX, player.y)) {
       player.x = nextX;
+      if (resolveBoxPushAxis(player, grid, otherGrid, otherPlayer, 'x', prevX, false)) {
+        pushedAnyBox = true;
+      }
     }
 
+    const prevY = player.y;
     const nextY = player.y + player.velocity.y;
     const hitDoorY = findCollidingDoor(grid, player.x, nextY);
     if (hitDoorY) {
@@ -1550,47 +1752,12 @@ export function updateLocalPlayerMovementAndHover(
       player.atDoorId = hitDoorY.id;
     } else if (!doesPlayerCollideWithWalls(grid, player.x, nextY)) {
       player.y = nextY;
+      if (resolveBoxPushAxis(player, grid, otherGrid, otherPlayer, 'y', prevY, false)) {
+        pushedAnyBox = true;
+      }
     }
 
-    const overlappedBox = findOverlappingBox(grid, player.x, player.y);
-    if (overlappedBox) {
-      player.boxColliding = true;
-      const dx = player.x - oldX;
-      const dy = player.y - oldY;
-      const linkedBox = otherGrid.boxes.find(
-        (b) => b.id === overlappedBox.linkedBoxId
-      );
-
-      if (dx !== 0) {
-        overlappedBox.x += dx;
-        if (linkedBox) linkedBox.x += dx;
-
-        const blocked =
-          doesBoxCollide(grid, overlappedBox) ||
-          (linkedBox ? doesBoxCollide(otherGrid, linkedBox, otherPlayer) : false);
-        if (blocked) {
-          overlappedBox.x -= dx;
-          if (linkedBox) linkedBox.x -= dx;
-          player.x = oldX;
-        }
-      }
-
-      if (dy !== 0) {
-        overlappedBox.y += dy;
-        if (linkedBox) linkedBox.y += dy;
-
-        const blocked =
-          doesBoxCollide(grid, overlappedBox) ||
-          (linkedBox ? doesBoxCollide(otherGrid, linkedBox, otherPlayer) : false);
-        if (blocked) {
-          overlappedBox.y -= dy;
-          if (linkedBox) linkedBox.y -= dy;
-          player.y = oldY;
-        }
-      }
-    } else {
-      player.boxColliding = false;
-    }
+    player.boxColliding = pushedAnyBox;
   } else {
     player.velocity = { x: 0, y: 0 };
     if (player.attackState.active && player.attackState.timerMs > 0) {

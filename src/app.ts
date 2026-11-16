@@ -99,6 +99,9 @@ export class ShiftGameApp {
   private lastProcessedClientTick = 0;
   private lastReceivedHostTick = 0;
   private clientHasLocallySimulatedInRoom = false;
+  private clientPauseToggleSeq = 0;
+  private hostRecentEvents: Array<{ tick: number; event: GameEvent }> = [];
+  private sentFinalEndingPacket = false;
 
   private zoomHudEl: HTMLElement | null = null;
   private zoomHudSliderEl: HTMLInputElement | null = null;
@@ -114,8 +117,11 @@ export class ShiftGameApp {
   private lastFrameTimestamp = 0;
   private rafId: number | null = null;
   private readonly boundDebugKeyDown: (e: Event) => void;
+  private readonly boundAudioUnlock: () => void;
   private readonly boundWindowResize: () => void;
   private readonly inputEventTarget: EventTarget | null;
+  private readonly unsubPeerPacket: () => void;
+  private readonly unsubPeerState: () => void;
 
   constructor(options: ShiftGameAppOptions) {
     this.container = options.container;
@@ -185,6 +191,9 @@ export class ShiftGameApp {
     this.inputManager.onPauseToggle(() => {
       if (!this.running) return;
       const state = this.engine.getState();
+      if (this.mode === 'online' && !this.isOnlineHost) {
+        this.clientPauseToggleSeq++;
+      }
       state.isPaused = !state.isPaused;
       this.renderCurrentState(0);
     });
@@ -208,6 +217,16 @@ export class ShiftGameApp {
       }
 
       if (e.code === 'KeyY') {
+        const allowLightingToggle =
+          this.mode === 'local' ||
+          Boolean(
+            this.testingMode ||
+              this.lobbyConfig.testingMode ||
+              state.lobbyConfig?.testingMode
+          );
+        if (!allowLightingToggle) {
+          return;
+        }
         this.lightingEnabled = !this.lightingEnabled;
         this.renderCurrentState(0);
       } else if (e.code === 'Equal' || e.code === 'NumpadAdd') {
@@ -222,6 +241,20 @@ export class ShiftGameApp {
       this.inputEventTarget.addEventListener('keydown', this.boundDebugKeyDown);
     }
 
+    this.boundAudioUnlock = () => {
+      void this.audioManager.init();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pointerdown', this.boundAudioUnlock, {
+        capture: true,
+        passive: true,
+      });
+      window.addEventListener('keydown', this.boundAudioUnlock, {
+        capture: true,
+        passive: true,
+      });
+    }
+
     this.boundWindowResize = () => {
       this.updateWindowStageScale();
       if (this.running) {
@@ -233,13 +266,16 @@ export class ShiftGameApp {
     }
 
     // Subscribe to P2P network packets and mid-game disconnect/error events
-    this.peerManager.onPacket((packet: NetPacket) => {
+    this.unsubPeerPacket = this.peerManager.onPacket((packet: NetPacket) => {
       this.handleNetPacket(packet);
     });
-    this.peerManager.onStateChange((state) => {
+    this.unsubPeerState = this.peerManager.onStateChange((state) => {
+      const curScreen = this.menuSystem.getCurrentScreen();
       if (
         this.running &&
         this.mode === 'online' &&
+        curScreen !== 'gameOver' &&
+        curScreen !== 'victory' &&
         (state === 'disconnected' || state === 'error')
       ) {
         this.running = false;
@@ -268,7 +304,6 @@ export class ShiftGameApp {
           this.lobbyConfig = { ...config };
           if (config.testingMode !== undefined) {
             this.testingMode = Boolean(config.testingMode);
-            this.saveTestingMode(this.testingMode);
           } else {
             this.lobbyConfig.testingMode = this.testingMode;
           }
@@ -294,7 +329,13 @@ export class ShiftGameApp {
           this.setWindowScaleMode(scaleMode);
         },
         getWindowScaleMode: () => this.windowScaleMode,
-        onScreenChange: () => {
+        onScreenChange: (screen) => {
+          if (typeof document !== 'undefined') {
+            document.body.classList.toggle(
+              'shift-in-gameplay',
+              screen === 'hidden'
+            );
+          }
           if (!this.menuSystem) return;
           this.updateWindowStageScale();
         },
@@ -315,6 +356,9 @@ export class ShiftGameApp {
   public setSpritesheet(image: CanvasImageSource): void {
     if (this.renderer instanceof GameRenderer) {
       this.renderer.setSpritesheet(image);
+      if (this.running) {
+        this.renderCurrentState(0);
+      }
     }
   }
 
@@ -1020,9 +1064,13 @@ export class ShiftGameApp {
     this.entityInterpolator.reset();
     this.lastReceivedHostTick = 0;
     this.clientHasLocallySimulatedInRoom = false;
+    this.clientPauseToggleSeq = 0;
+    this.hostRecentEvents = [];
+    this.sentFinalEndingPacket = false;
     this.engine.resetGame();
     this.engine.setLobbyConfig(this.lobbyConfig);
 
+    this.inputManager.resetSequenceCounters?.();
     this.inputManager.setPlayMode('local', 1);
     this.inputManager.setEnabled(true);
     this.renderer.resizeForMode('local');
@@ -1056,10 +1104,14 @@ export class ShiftGameApp {
     this.lastProcessedClientTick = 0;
     this.lastReceivedHostTick = 0;
     this.clientHasLocallySimulatedInRoom = false;
+    this.clientPauseToggleSeq = 0;
+    this.hostRecentEvents = [];
+    this.sentFinalEndingPacket = false;
 
     this.engine.resetGame();
     this.engine.setLobbyConfig(this.lobbyConfig);
 
+    this.inputManager.resetSequenceCounters?.();
     this.inputManager.setPlayMode('online', this.localPlayerId);
     this.inputManager.setEnabled(true);
     this.renderer.resizeForMode('online');
@@ -1100,7 +1152,6 @@ export class ShiftGameApp {
         this.lastProcessedClientTick = packet.clientTick;
         if (packet.clientState) {
           this.engine.applyClientPlayerSync(packet.clientState);
-          this.entityInterpolator.recordRemotePlayerSync(2, packet.clientState);
         }
       }
     } else if (packet.type === 'state' && !this.isOnlineHost) {
@@ -1111,6 +1162,7 @@ export class ShiftGameApp {
 
       const prevState = this.engine.getState();
       const localP2 = prevState.players[1];
+      const savedSpeed = localP2.speed;
       const savedLocalP2 = {
         x: localP2.x,
         y: localP2.y,
@@ -1160,10 +1212,20 @@ export class ShiftGameApp {
       const shiftIntoWall =
         shiftChanged &&
         doesPlayerCollideWithWalls(p2Grid, savedLocalP2.x, savedLocalP2.y);
+      const speedDropped = state.players[1].speed < savedSpeed - 0.001;
+      const hostAckedDiverged =
+        packet.lastProcessedClientTick >= this.clientTickCounter &&
+        Math.hypot(
+          state.players[1].x - savedLocalP2.x,
+          state.players[1].y - savedLocalP2.y
+        ) >
+          75; // > 3 tiles divergence after Host already processed our latest tick
       const damagedOrDead =
         newEvents.some(
           (ev) => ev.type === 'playerDamaged' || ev.type === 'gameOver'
         ) ||
+        speedDropped ||
+        hostAckedDiverged ||
         !state.players[1].isAlive ||
         state.phase !== 'playing';
 
@@ -1261,6 +1323,13 @@ export class ShiftGameApp {
     // Note: 'playSound' GameEvents are handled directly by audioManager.updateAmbientAndLoops()
     // with internal eventId deduplication and cross-dimension low-pass filtering.
     for (const ev of events) {
+      if (
+        this.mode === 'online' &&
+        ev.playerId !== undefined &&
+        ev.playerId !== this.localPlayerId
+      ) {
+        continue;
+      }
       if (ev.type === 'flashScreen' && ev.color) {
         this.renderer.triggerFlash(ev.color, ev.durationMs, ev.maxOpacity);
       } else if (ev.type === 'playerDamaged') {
@@ -1320,11 +1389,18 @@ export class ShiftGameApp {
         this.checkPhaseOverlayTransitions(state);
       } else if (this.isOnlineHost) {
         // Online Host (Player 1, Left side):
-        // Note: In Online Mode, pressing Shift on Host should only increment p1Input.shiftRequestSeq,
-        // while p2Input comes strictly from the remote Client's InputSequenceTracker!
+        const curState = this.engine.getState();
+        if (this.clientInputTracker.consumePauseToggle()) {
+          curState.isPaused = !curState.isPaused;
+        }
         const p1Input = this.inputManager.getPlayerInput(1);
-        const p2Input = this.clientInputTracker.consumeForTick();
+        const p2Input = curState.isPaused
+          ? this.clientInputTracker.getDeliveredInput()
+          : this.clientInputTracker.consumeForTick();
         const state = this.engine.tick(SIMULATION_TICK_MS, p1Input, p2Input);
+
+        // Record authoritative Player 2 coordinates (not unvalidated raw clientState)
+        this.entityInterpolator.recordSnapshot(state, this.localPlayerId);
 
         const newEvents = this.eventDeduplicator.extractFromState(state);
         this.processGameEvents(newEvents);
@@ -1335,48 +1411,97 @@ export class ShiftGameApp {
         );
         this.checkPhaseOverlayTransitions(state);
 
-        this.peerManager.sendPacket({
-          type: 'state',
-          hostTick: state.tick,
-          lastProcessedClientTick: this.lastProcessedClientTick,
-          state,
-        });
+        // Retain recent events across a 12-tick sliding window so dropped/coalesced snapshots never miss critical SFX/damage events
+        for (const ev of state.events) {
+          this.hostRecentEvents.push({ tick: state.tick, event: ev });
+        }
+        const minTick = state.tick - 12;
+        while (
+          this.hostRecentEvents.length > 0 &&
+          (this.hostRecentEvents[0].tick < minTick ||
+            this.hostRecentEvents.length > 30)
+        ) {
+          this.hostRecentEvents.shift();
+        }
+
+        const isEnded =
+          state.phase === 'gameOver' || state.phase === 'victory';
+        if (!isEnded || !this.sentFinalEndingPacket) {
+          if (isEnded) {
+            this.sentFinalEndingPacket = true;
+          }
+          const stripPaths = (grid: typeof state.room.worlds.neutral) =>
+            grid.blobbies.some((b) => b.path.length > 0)
+              ? {
+                  ...grid,
+                  blobbies: grid.blobbies.map((b) =>
+                    b.path.length > 0 ? { ...b, path: [] } : b
+                  ),
+                }
+              : grid;
+          const wireState: GameState = {
+            ...state,
+            events: this.hostRecentEvents.map((e) => e.event),
+            persistence: {},
+            room: {
+              ...state.room,
+              worlds: {
+                neutral: stripPaths(state.room.worlds.neutral),
+                dangerous: stripPaths(state.room.worlds.dangerous),
+              },
+            },
+          };
+          this.peerManager.sendPacket({
+            type: 'state',
+            hostTick: state.tick,
+            lastProcessedClientTick: this.lastProcessedClientTick,
+            state: wireState,
+          });
+        }
       } else {
         // Online Client (Player 2, Right side):
-        // Simulate Player 2 movement locally at 60Hz (zero input latency) and send
-        // input + clientState to Host.
-        this.clientTickCounter++;
-        const localInput = this.inputManager.getPlayerInput(2);
-        const state = this.engine.tickClientLocal(
-          SIMULATION_TICK_MS,
-          localInput
-        );
-        this.clientHasLocallySimulatedInRoom = true;
-        const p2 = state.players[1];
-        this.peerManager.sendPacket({
-          type: 'input',
-          playerId: 2,
-          clientTick: this.clientTickCounter,
-          input: localInput,
-          clientState: {
-            roomName: state.roomName,
-            roomsEntered: state.roomsEntered,
-            evilOnLeft: state.evilOnLeft,
-            ackHostTick: this.lastReceivedHostTick,
-            x: p2.x,
-            y: p2.y,
-            velocity: { x: p2.velocity.x, y: p2.velocity.y },
-            direction: p2.direction,
-            flashLightDir: p2.flashLightDir,
-            isMoving: p2.isMoving,
-            boxColliding: p2.boxColliding,
-          },
-        });
-        this.audioManager.updateAmbientAndLoops(
-          state,
-          this.localPlayerId,
-          this.mode
-        );
+        const curClientState = this.engine.getState();
+        if (
+          curClientState.phase !== 'gameOver' &&
+          curClientState.phase !== 'victory'
+        ) {
+          this.clientTickCounter++;
+          const localInput = this.inputManager.getPlayerInput(2);
+          const outgoingInput =
+            this.clientPauseToggleSeq > 0
+              ? { ...localInput, pauseToggleSeq: this.clientPauseToggleSeq }
+              : localInput;
+          const state = this.engine.tickClientLocal(
+            SIMULATION_TICK_MS,
+            localInput
+          );
+          this.clientHasLocallySimulatedInRoom = true;
+          const p2 = state.players[1];
+          this.peerManager.sendPacket({
+            type: 'input',
+            playerId: 2,
+            clientTick: this.clientTickCounter,
+            input: outgoingInput,
+            clientState: {
+              roomName: state.roomName,
+              roomsEntered: state.roomsEntered,
+              evilOnLeft: state.evilOnLeft,
+              ackHostTick: this.lastReceivedHostTick,
+              x: p2.x,
+              y: p2.y,
+              velocity: { x: p2.velocity.x, y: p2.velocity.y },
+              direction: p2.direction,
+              flashLightDir: p2.flashLightDir,
+              isMoving: p2.isMoving,
+              boxColliding: p2.boxColliding,
+            },
+          });
+          this.audioManager.updateAmbientAndLoops(
+            state,
+            this.localPlayerId,
+            this.mode
+          );
+        }
       }
     }
 
@@ -1440,6 +1565,9 @@ export class ShiftGameApp {
       ? Math.max(1, rawViewportHeight - 110)
       : rawViewportHeight;
 
+    const isLocalMobileHeadToHead =
+      this.mode === 'local' && Boolean(this.mobileControls?.isEnabled());
+
     try {
       this.renderer.render(
         state,
@@ -1450,7 +1578,9 @@ export class ShiftGameApp {
           lightingEnabled: this.lightingEnabled && !effectiveTestingMode,
           testingMode: effectiveTestingMode,
           cameraZoom: this.cameraZoom,
-          windowScaleMode: this.windowScaleMode,
+          windowScaleMode: isLocalMobileHeadToHead
+            ? 'fit'
+            : this.windowScaleMode,
           viewportWidth: rawViewportWidth,
           viewportHeight: availHeight,
           keyStrings,
@@ -1494,15 +1624,26 @@ export class ShiftGameApp {
     }
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.boundWindowResize);
+      window.removeEventListener('pointerdown', this.boundAudioUnlock, {
+        capture: true,
+      });
+      window.removeEventListener('keydown', this.boundAudioUnlock, {
+        capture: true,
+      });
+    }
+    if (typeof document !== 'undefined') {
+      document.body.classList.remove('shift-in-gameplay');
     }
     this.zoomHudEl?.remove();
     this.zoomShowBtnEl?.remove();
     this.controlsHudEl?.remove();
     this.controlsShowBtnEl?.remove();
+    this.unsubPeerPacket();
+    this.unsubPeerState();
     this.mobileControls.destroy();
     this.inputManager.destroy();
     this.menuSystem.destroy();
     this.peerManager.disconnect();
-    this.audioManager.stopAll();
+    this.audioManager.destroy?.() ?? this.audioManager.stopAll();
   }
 }

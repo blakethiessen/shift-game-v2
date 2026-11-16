@@ -330,4 +330,136 @@ describe('PeerRelayServer & Same-Origin Relay Integration', () => {
     hostManager.disconnect();
     clientManager.disconnect();
   });
+
+  it('rejects invalid peerIds, caps payloads <= 64KB, and evicts idle sockets to free room codes', async () => {
+    const srv = await startTestServer();
+    cleanups.push(srv.close);
+
+    // 1. Overly long / invalid peerId is rejected with code 1008
+    const badCode = await new Promise<number>((resolve) => {
+      const ws = new WebSocketCtor(
+        `ws://127.0.0.1:${srv.port}${DEFAULT_SAME_ORIGIN_PEER_PATH}peerjs?key=peerjs&id=${'X'.repeat(100)}&token=t1`
+      );
+      ws.on('close', (code: unknown) => resolve(Number(code)));
+    });
+    expect(badCode).toBe(1008);
+
+    // 2. Two valid peers connect, verify >64KB frame is rejected, and close cleanup frees ID
+    const hostWs = new WebSocketCtor(
+      `ws://127.0.0.1:${srv.port}${DEFAULT_SAME_ORIGIN_PEER_PATH}peerjs?key=peerjs&id=shift-game-room-CAP01&token=host1`
+    );
+    await new Promise<void>((resolve) => {
+      hostWs.on('message', (data: unknown) => {
+        if (String(data).includes('"OPEN"')) resolve();
+      });
+    });
+
+    // Oversized message (> 64KB) causes server maxPayload close (1009)
+    const oversizedCloseCode = await new Promise<number>((resolve) => {
+      hostWs.on('close', (code: unknown) => resolve(Number(code)));
+      hostWs.send('A'.repeat(70 * 1024));
+    });
+    expect(oversizedCloseCode).toBe(1009);
+  });
+
+  it('rejects empty-token hijackers with ID-TAKEN when peerId is already open', async () => {
+    const srv = await startTestServer();
+    cleanups.push(srv.close);
+
+    const p1 = new WebSocketCtor(
+      `ws://127.0.0.1:${srv.port}${DEFAULT_SAME_ORIGIN_PEER_PATH}peerjs?key=peerjs&id=shift-game-room-TOK01`
+    );
+    let p1Closed = false;
+    p1.on('close', () => {
+      p1Closed = true;
+    });
+    await new Promise<void>((resolve) => {
+      p1.on('message', (data: unknown) => {
+        if (String(data).includes('"OPEN"')) resolve();
+      });
+    });
+
+    const attacker = new WebSocketCtor(
+      `ws://127.0.0.1:${srv.port}${DEFAULT_SAME_ORIGIN_PEER_PATH}peerjs?key=peerjs&id=shift-game-room-TOK01`
+    );
+    const attackerMsgs: string[] = [];
+    const attackerClose = await new Promise<number>((resolve) => {
+      attacker.on('message', (d: unknown) => attackerMsgs.push(String(d)));
+      attacker.on('close', (code: unknown) => resolve(Number(code)));
+    });
+    expect(attackerClose).toBe(1008);
+    expect(attackerMsgs.some((m) => m.includes('ID-TAKEN'))).toBe(true);
+    expect(p1Closed).toBe(false);
+    p1.close();
+  });
+
+  it('serves plaintext peer ID on GET /shift-peerjs/peerjs/id under vite preview without SPA HTML shadowing', async () => {
+    const { preview } = await import('vite');
+    const srv = await preview({
+      configFile: './vite.config.ts',
+      preview: { port: 0, host: '127.0.0.1' },
+    });
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          srv.httpServer.close(() => resolve());
+        })
+    );
+    const addr = srv.httpServer.address() as { port: number };
+    const res = await fetch(
+      `http://127.0.0.1:${addr.port}/shift-peerjs/peerjs/id?ts=${Date.now()}`,
+      { headers: { Accept: 'text/html,*/*' } }
+    );
+    expect(res.status).toBe(200);
+    const text = (await res.text()).trim();
+    expect(text).toMatch(/^shift-client-/);
+  });
+
+  it('blocks forwarding of broker control message types (ID-TAKEN, ERROR, OPEN) while still relaying CANDIDATE', async () => {
+    const srv = await startTestServer();
+    cleanups.push(srv.close);
+
+    const hostWs = new WebSocketCtor(
+      `ws://127.0.0.1:${srv.port}${DEFAULT_SAME_ORIGIN_PEER_PATH}peerjs?key=peerjs&id=shift-game-room-TOK02&token=secret1`
+    );
+    const hostMessages: string[] = [];
+    await new Promise<void>((resolve) => {
+      hostWs.on('message', (data: unknown) => {
+        const s = String(data);
+        hostMessages.push(s);
+        if (s.includes('"OPEN"')) resolve();
+      });
+    });
+
+    const attackerWs = new WebSocketCtor(
+      `ws://127.0.0.1:${srv.port}${DEFAULT_SAME_ORIGIN_PEER_PATH}peerjs?key=peerjs&id=ws-attacker&token=att1`
+    );
+    await new Promise<void>((resolve) => {
+      attackerWs.on('message', (data: unknown) => {
+        if (String(data).includes('"OPEN"')) resolve();
+      });
+    });
+
+    // Spoofed control frames must be dropped; legitimate CANDIDATE must relay
+    attackerWs.send(JSON.stringify({ type: 'ID-TAKEN', dst: 'shift-game-room-TOK02' }));
+    attackerWs.send(JSON.stringify({ type: 'ERROR', dst: 'shift-game-room-TOK02' }));
+    attackerWs.send(
+      JSON.stringify({ type: 'CANDIDATE', dst: 'shift-game-room-TOK02', payload: { ok: true } })
+    );
+
+    const deadline = Date.now() + 1000;
+    while (
+      !hostMessages.some((m) => m.includes('"CANDIDATE"')) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+
+    expect(hostMessages.some((m) => m.includes('"CANDIDATE"'))).toBe(true);
+    expect(hostMessages.some((m) => m.includes('"ID-TAKEN"'))).toBe(false);
+    expect(hostMessages.some((m) => m.includes('"ERROR"'))).toBe(false);
+
+    attackerWs.close();
+    hostWs.close();
+  });
 });

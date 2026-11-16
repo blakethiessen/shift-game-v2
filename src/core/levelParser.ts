@@ -280,12 +280,20 @@ const staticRoomCellsCache = new Map<
   { neutral: GridCell[][]; dangerous: GridCell[][] }
 >();
 
+function hasRawLevel(roomName: string): boolean {
+  return (
+    typeof roomName === 'string' &&
+    roomName.length > 0 &&
+    Object.prototype.hasOwnProperty.call(RAW_LEVELS, roomName)
+  );
+}
+
 /**
  * Returns a cached baseline RoomState template for `roomName`, or null if `roomName`
  * is not in RAW_LEVELS. Used to reconstruct static room entity metadata after network compaction.
  */
 export function getStaticRoomTemplate(roomName: string): RoomState | null {
-  if (!roomName || !RAW_LEVELS[roomName]) {
+  if (!hasRawLevel(roomName)) {
     return null;
   }
   let cached = staticRoomTemplateCache.get(roomName);
@@ -296,6 +304,15 @@ export function getStaticRoomTemplate(roomName: string): RoomState | null {
   return cached;
 }
 
+export function cloneGridCells(cells: GridCell[][]): GridCell[][] {
+  return cells.map((col) =>
+    col.map((cell) => ({
+      ...cell,
+      obstacleGids: [...cell.obstacleGids],
+    }))
+  );
+}
+
 /**
  * Returns the cached static 20x26 GridCell matrices for `neutral` and `dangerous`
  * worlds in a known room, or null if `roomName` is not in RAW_LEVELS.
@@ -303,7 +320,7 @@ export function getStaticRoomTemplate(roomName: string): RoomState | null {
 export function getStaticRoomCells(
   roomName: string
 ): { neutral: GridCell[][]; dangerous: GridCell[][] } | null {
-  if (!roomName || !RAW_LEVELS[roomName]) {
+  if (!hasRawLevel(roomName)) {
     return null;
   }
   let cached = staticRoomCellsCache.get(roomName);
@@ -323,10 +340,10 @@ export function parseRoom(
   rng: SeededRandom = new SeededRandom(0x5f3759df),
   persistence?: RoomPersistenceState
 ): RoomState {
-  const rawDef = RAW_LEVELS[roomName];
-  if (!rawDef) {
+  if (!hasRawLevel(roomName)) {
     throw new Error(`Unknown room "${roomName}" in RAW_LEVELS`);
   }
+  const rawDef = RAW_LEVELS[roomName];
 
   const neutral = createEmptyWorldGrid('neutral');
   const dangerous = createEmptyWorldGrid('dangerous');
@@ -895,8 +912,8 @@ export function applyRoomPersistence(
     }
   }
 
-  // 5. Restore blobbies if room was previously visited and saved blobbies
-  if (persistence.visited && persistence.blobbies.length > 0) {
+  // 5. Restore blobbies if room was previously visited (including 0 when all blobbies were killed)
+  if (persistence.visited) {
     room.worlds.neutral.blobbies = [];
     room.worlds.dangerous.blobbies = [];
     let idx = 0;
@@ -938,7 +955,7 @@ export function applyRoomPersistence(
           angle: savedTear.angle,
           stage: savedTear.stage,
           growthTimerMs: 3000,
-          hasSpread: savedTear.stage >= 4,
+          hasSpread: savedTear.hasSpread ?? savedTear.stage >= 4,
         });
       }
     }

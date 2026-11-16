@@ -291,7 +291,82 @@ describe('lightingRenderer', () => {
     const fireOff: FireEntity = { ...fireOn, isOn: false };
     const offParams = getFireHaloParams(fireOff, 250);
     expect(offParams.radius).toBe(22);
-    expect(offParams.punchLightCircle).toBe(false);
+    expect(offParams.punchLightCircle).toBe(true);
+  });
+
+  it('punches all light cutouts before drawing fire tints so player halos do not erase fire glow', () => {
+    const neutral = createMockWorldGrid('neutral');
+    neutral.fires.push({
+      id: 'f-1',
+      world: 'neutral',
+      x: 200,
+      y: 200,
+      gid: 1,
+      variant: 1,
+      isOn: true,
+      damageTimerMs: 0,
+    });
+    const room: RoomState = {
+      roomName: 'spawnRoom',
+      worlds: { neutral, dangerous: createMockWorldGrid('dangerous') },
+      tears: [],
+      pendingRegrowths: [],
+      blobbySpawnTimerMs: 0,
+      chestPressurePlatesToPress: 0,
+      chestPressurePlatesPressed: 0,
+      swooshTriggered: false,
+    };
+
+    const opSequence: string[] = [];
+    const baseCtx = createMockContext();
+    const offscreenCtx = {
+      ...baseCtx,
+      arc: vi.fn((...args: any[]) => {
+        (baseCtx as any).arc?.(...args);
+        opSequence.push(`arc:${offscreenCtx.globalCompositeOperation}:${args[2]}`);
+      }),
+      beginPath: vi.fn(),
+      closePath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      createRadialGradient: vi.fn((...args: any[]) => {
+        const g = (baseCtx.createRadialGradient as any)(...args);
+        opSequence.push(`grad:${offscreenCtx.globalCompositeOperation}:${args[5]}`);
+        return g;
+      }),
+      fillRect: vi.fn((...args: any[]) => {
+        (baseCtx.fillRect as any)(...args);
+      }),
+      fill: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      globalCompositeOperation: 'source-over',
+      globalAlpha: 1,
+      fillStyle: '#000000',
+    };
+    const targetCtx = createMockContext();
+    const renderer = new LightingRenderer(() => ({
+      width: 500,
+      height: 650,
+      getContext: () => offscreenCtx,
+    } as unknown as HTMLCanvasElement));
+
+    renderer.renderDimensionLighting(targetCtx as unknown as CanvasRenderingContext2D, {
+      side: 'left',
+      evilOnLeft: false,
+      room,
+      player: createMockPlayer({ x: 200, y: 200, flashlightMode: 'none' }),
+      timeMs: 0,
+    });
+
+    const lastPlayerPunchIdx = opSequence.findIndex((s) =>
+      s.startsWith('grad:destination-out:50')
+    );
+    const fireTintIdx = opSequence.findIndex((s) =>
+      s.startsWith('grad:source-over:7') || s.startsWith('grad:source-over:8')
+    );
+    expect(lastPlayerPunchIdx).toBeGreaterThanOrEqual(0);
+    expect(fireTintIdx).toBeGreaterThan(lastPlayerPunchIdx);
   });
 
   it('punches base 50px LightHalo plus flashlight1 (150px cone), flashlight2 (350px cone), and lantern (175px circle)', () => {

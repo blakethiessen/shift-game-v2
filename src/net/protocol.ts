@@ -45,6 +45,8 @@ const SEQUENCE_KEYS = [
   'pingSeq',
 ] as const;
 
+const MAX_SEQUENCE_STEP_BUFFER = 8;
+
 type SequenceKey = (typeof SEQUENCE_KEYS)[number];
 
 const VALID_PING_KINDS: ReadonlySet<PingKind> = new Set<PingKind>(['here', 'action', 'wait']);
@@ -180,6 +182,8 @@ export function buildInviteUrl(baseUrl: string, roomCode: string): string {
  */
 export class InputSequenceTracker {
   private lastClientTick = 0;
+  private deliveredPauseToggleSeq = 0;
+  private targetPauseToggleSeq = 0;
   private up = false;
   private down = false;
   private left = false;
@@ -228,10 +232,26 @@ export class InputSequenceTracker {
     for (const key of SEQUENCE_KEYS) {
       const incomingVal = input[key];
       if (typeof incomingVal === 'number' && Number.isFinite(incomingVal) && incomingVal >= 0) {
-        const floored = Math.floor(incomingVal);
-        if (floored > this.targetSeq[key]) {
-          this.targetSeq[key] = floored;
+        const clamped = Math.min(
+          Math.floor(incomingVal),
+          this.deliveredSeq[key] + MAX_SEQUENCE_STEP_BUFFER
+        );
+        if (clamped > this.targetSeq[key]) {
+          this.targetSeq[key] = clamped;
         }
+      }
+    }
+    if (
+      typeof input.pauseToggleSeq === 'number' &&
+      Number.isFinite(input.pauseToggleSeq) &&
+      input.pauseToggleSeq >= 0
+    ) {
+      const clampedPause = Math.min(
+        Math.floor(input.pauseToggleSeq),
+        this.deliveredPauseToggleSeq + MAX_SEQUENCE_STEP_BUFFER
+      );
+      if (clampedPause > this.targetPauseToggleSeq) {
+        this.targetPauseToggleSeq = clampedPause;
       }
     }
 
@@ -244,6 +264,14 @@ export class InputSequenceTracker {
         }
       }
     }
+  }
+
+  public consumePauseToggle(): boolean {
+    if (this.deliveredPauseToggleSeq < this.targetPauseToggleSeq) {
+      this.deliveredPauseToggleSeq++;
+      return true;
+    }
+    return false;
   }
 
   public consumeForTick(): PlayerInput {
@@ -275,6 +303,10 @@ export class InputSequenceTracker {
       pingSeq: this.deliveredSeq.pingSeq,
     };
 
+    if (this.deliveredPauseToggleSeq > 0) {
+      snapshot.pauseToggleSeq = this.deliveredPauseToggleSeq;
+    }
+
     if (pingKind !== undefined) {
       snapshot.pingKind = pingKind;
     }
@@ -283,6 +315,9 @@ export class InputSequenceTracker {
   }
 
   public hasPendingActions(): boolean {
+    if (this.deliveredPauseToggleSeq < this.targetPauseToggleSeq) {
+      return true;
+    }
     for (const key of SEQUENCE_KEYS) {
       if (this.deliveredSeq[key] < this.targetSeq[key]) {
         return true;
@@ -325,6 +360,8 @@ export class InputSequenceTracker {
       this.targetSeq[key] = 0;
       this.deliveredSeq[key] = 0;
     }
+    this.targetPauseToggleSeq = 0;
+    this.deliveredPauseToggleSeq = 0;
     this.pingKindBySeq.clear();
     this.lastPingKind = undefined;
   }
@@ -412,6 +449,12 @@ export function isValidPlayerInput(value: unknown): value is PlayerInput {
     }
   }
   if (
+    value.pauseToggleSeq !== undefined &&
+    !isNonNegativeNumber(value.pauseToggleSeq)
+  ) {
+    return false;
+  }
+  if (
     value.pingKind !== undefined &&
     (typeof value.pingKind !== 'string' || !VALID_PING_KINDS.has(value.pingKind as PingKind))
   ) {
@@ -465,6 +508,82 @@ export function isValidClientPlayerSyncState(
   return true;
 }
 
+function isValidPlayerState(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    (value.id === 1 || value.id === 2) &&
+    (value.side === 'left' || value.side === 'right') &&
+    typeof value.x === 'number' &&
+    Number.isFinite(value.x) &&
+    typeof value.y === 'number' &&
+    Number.isFinite(value.y) &&
+    isRecord(value.velocity) &&
+    typeof value.velocity.x === 'number' &&
+    Number.isFinite(value.velocity.x) &&
+    typeof value.velocity.y === 'number' &&
+    Number.isFinite(value.velocity.y) &&
+    typeof value.speed === 'number' &&
+    Number.isFinite(value.speed) &&
+    typeof value.isAlive === 'boolean' &&
+    typeof value.isMoving === 'boolean' &&
+    Array.isArray(value.inventory)
+  );
+}
+
+function isValidGridEntries(
+  arr: unknown,
+  allowCompactScalarOrTuple: boolean
+): arr is unknown[] {
+  if (!Array.isArray(arr)) return false;
+  for (const entry of arr) {
+    if (isRecord(entry)) continue;
+    if (
+      allowCompactScalarOrTuple &&
+      (typeof entry === 'number' ||
+        typeof entry === 'boolean' ||
+        Array.isArray(entry))
+    ) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function isSafeRoomKey(name: string): boolean {
+  if (!name || name === '__proto__' || name === 'constructor' || name === 'prototype') {
+    return false;
+  }
+  if (
+    name in Object.prototype &&
+    !Object.prototype.hasOwnProperty.call(RAW_LEVELS, name)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isValidWorldGrid(value: unknown, allowCompacted: boolean): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    (value.world === 'neutral' || value.world === 'dangerous') &&
+    Array.isArray(value.cells) &&
+    isValidGridEntries(value.doors, allowCompacted) &&
+    isValidGridEntries(value.boxes, allowCompacted) &&
+    isValidGridEntries(value.lamps, allowCompacted) &&
+    isValidGridEntries(value.evilLamps, allowCompacted) &&
+    isValidGridEntries(value.pressurePlates, allowCompacted) &&
+    isValidGridEntries(value.levers, allowCompacted) &&
+    isValidGridEntries(value.chests, allowCompacted) &&
+    isValidGridEntries(value.safes, allowCompacted) &&
+    isValidGridEntries(value.fires, allowCompacted) &&
+    isValidGridEntries(value.statues, allowCompacted) &&
+    isValidGridEntries(value.books, allowCompacted) &&
+    isValidGridEntries(value.items, allowCompacted) &&
+    isValidGridEntries(value.blobbies, false)
+  );
+}
+
 export function isValidNetPacket(value: unknown): value is NetPacket {
   if (!isRecord(value) || typeof value.type !== 'string') {
     return false;
@@ -492,12 +611,27 @@ export function isValidNetPacket(value: unknown): value is NetPacket {
         return false;
       }
       const st = value.state;
+      const allowCompacted =
+        (value as { _cellsCompacted?: unknown })._cellsCompacted === true;
       return (
         isNonNegativeNumber(st.tick) &&
         typeof st.roomName === 'string' &&
+        isSafeRoomKey(st.roomName) &&
+        typeof st.evilOnLeft === 'boolean' &&
+        typeof st.isPaused === 'boolean' &&
         Array.isArray(st.players) &&
         st.players.length === 2 &&
+        isValidPlayerState(st.players[0]) &&
+        isValidPlayerState(st.players[1]) &&
         isRecord(st.room) &&
+        isRecord(st.room.worlds) &&
+        isValidWorldGrid(st.room.worlds.neutral, allowCompacted) &&
+        isValidWorldGrid(st.room.worlds.dangerous, allowCompacted) &&
+        Array.isArray(st.room.tears) &&
+        Array.isArray(st.room.pendingRegrowths) &&
+        isRecord(st.shiftRequest) &&
+        isValidLobbyConfig(st.lobbyConfig) &&
+        (st.persistence === undefined || isRecord(st.persistence)) &&
         Array.isArray(st.events)
       );
     }
@@ -571,7 +705,10 @@ function compactWorldGridForWire(
     ...world,
     cells: [],
     books:
-      world.books.length === templateWorld.books.length ? [] : world.books,
+      world.books.length === templateWorld.books.length &&
+      world.books.every((b, i) => b.id === templateWorld.books[i].id)
+        ? []
+        : world.books,
     boxes: canCompactBoxes
       ? world.boxes.map((b) => [b.x, b.y])
       : world.boxes,
@@ -580,73 +717,44 @@ function compactWorldGridForWire(
       world.doors.length === templateWorld.doors.length &&
       world.doors.every((d, i) => d.id === templateWorld.doors[i].id)
         ? world.doors.map((d) => [d.unlocked ? 1 : 0, d.playerAtDoor ? 1 : 0])
-        : world.doors.map((d) => ({
-            id: d.id,
-            unlocked: d.unlocked,
-            playerAtDoor: d.playerAtDoor,
-          })),
+        : world.doors,
     lamps:
       world.lamps.length === templateWorld.lamps.length &&
       world.lamps.every((l, i) => l.id === templateWorld.lamps[i].id)
         ? world.lamps.map((l) => (l.isOn ? 1 : 0))
-        : world.lamps.map((l) => ({
-            id: l.id,
-            isOn: l.isOn,
-          })),
+        : world.lamps,
     evilLamps:
       world.evilLamps.length === templateWorld.evilLamps.length &&
       world.evilLamps.every((el, i) => el.id === templateWorld.evilLamps[i].id)
         ? world.evilLamps.map((el) => [el.isOn ? 1 : 0, el.stage, el.timerMs])
-        : world.evilLamps.map((el) => ({
-            id: el.id,
-            isOn: el.isOn,
-            stage: el.stage,
-            timerMs: el.timerMs,
-          })),
+        : world.evilLamps,
     pressurePlates:
       world.pressurePlates.length === templateWorld.pressurePlates.length &&
       world.pressurePlates.every(
         (p, i) => p.id === templateWorld.pressurePlates[i].id
       )
         ? world.pressurePlates.map((p) => (p.touched ? 1 : 0))
-        : world.pressurePlates.map((p) => ({
-            id: p.id,
-            touched: p.touched,
-          })),
+        : world.pressurePlates,
     levers:
       world.levers.length === templateWorld.levers.length &&
       world.levers.every((lv, i) => lv.id === templateWorld.levers[i].id)
         ? world.levers.map((lv) => (lv.activated ? 1 : 0))
-        : world.levers.map((lv) => ({
-            id: lv.id,
-            activated: lv.activated,
-          })),
+        : world.levers,
     chests:
       world.chests.length === templateWorld.chests.length &&
       world.chests.every((c, i) => c.id === templateWorld.chests[i].id)
         ? world.chests.map((c) => [c.opened ? 1 : 0, c.used ? 1 : 0])
-        : world.chests.map((c) => ({
-            id: c.id,
-            opened: c.opened,
-            used: c.used,
-          })),
+        : world.chests,
     safes:
       world.safes.length === templateWorld.safes.length &&
       world.safes.every((s, i) => s.id === templateWorld.safes[i].id)
         ? world.safes.map((s) => (s.opened ? 1 : 0))
-        : world.safes.map((s) => ({
-            id: s.id,
-            opened: s.opened,
-          })),
+        : world.safes,
     fires:
       world.fires.length === templateWorld.fires.length &&
       world.fires.every((f, i) => f.id === templateWorld.fires[i].id)
         ? world.fires.map((f) => [f.isOn ? 1 : 0, f.damageTimerMs])
-        : world.fires.map((f) => ({
-            id: f.id,
-            isOn: f.isOn,
-            damageTimerMs: f.damageTimerMs,
-          })),
+        : world.fires,
     statues:
       world.statues.length === templateWorld.statues.length &&
       world.statues.every((s, i) => s.id === templateWorld.statues[i].id)
@@ -656,13 +764,7 @@ function compactWorldGridForWire(
             stObj.hasGreenGem ? 1 : 0,
             stObj.blackKeySpawned ? 1 : 0,
           ])
-        : world.statues.map((stObj) => ({
-            id: stObj.id,
-            hasRedGem: stObj.hasRedGem,
-            hasBlueGem: stObj.hasBlueGem,
-            hasGreenGem: stObj.hasGreenGem,
-            blackKeySpawned: stObj.blackKeySpawned,
-          })),
+        : world.statues,
   };
 }
 
@@ -684,7 +786,15 @@ function restoreCompactedWorldGrid(
   if (
     Array.isArray(world.boxes) &&
     world.boxes.length === templateWorld.boxes.length &&
-    world.boxes.every((b) => Array.isArray(b))
+    world.boxes.every(
+      (b) =>
+        Array.isArray(b) &&
+        b.length >= 2 &&
+        typeof b[0] === 'number' &&
+        Number.isFinite(b[0]) &&
+        typeof b[1] === 'number' &&
+        Number.isFinite(b[1])
+    )
   ) {
     world.boxes = world.boxes.map((pair, i) => {
       const coords = pair as unknown as [number, number];
@@ -903,6 +1013,21 @@ function restoreCompactedWorldGrid(
       };
     });
   }
+
+  // Filter out any unmapped compacted scalars/tuples so runtime grids only contain entity records
+  world.doors = world.doors.filter((e) => isRecord(e));
+  world.boxes = world.boxes.filter((e) => isRecord(e));
+  world.lamps = world.lamps.filter((e) => isRecord(e));
+  world.evilLamps = world.evilLamps.filter((e) => isRecord(e));
+  world.pressurePlates = world.pressurePlates.filter((e) => isRecord(e));
+  world.levers = world.levers.filter((e) => isRecord(e));
+  world.chests = world.chests.filter((e) => isRecord(e));
+  world.safes = world.safes.filter((e) => isRecord(e));
+  world.fires = world.fires.filter((e) => isRecord(e));
+  world.statues = world.statues.filter((e) => isRecord(e));
+  world.books = world.books.filter((e) => isRecord(e));
+  world.items = world.items.filter((e) => isRecord(e));
+  world.blobbies = world.blobbies.filter((e) => isRecord(e));
 }
 
 function compactPersistenceForWire(
@@ -1085,15 +1210,33 @@ export function deserializePacket(raw: unknown): NetPacket | null {
       }
     }
     const fullPersistence: Record<string, RoomPersistenceState> = {};
+    const rawPersist =
+      parsed.state.persistence && typeof parsed.state.persistence === 'object'
+        ? parsed.state.persistence
+        : null;
     for (const roomKey of Object.keys(RAW_LEVELS)) {
-      const rawRecord = parsed.state.persistence?.[roomKey];
+      const hasRoom =
+        rawPersist !== null &&
+        Object.prototype.hasOwnProperty.call(rawPersist, roomKey);
+      const rawRecord =
+        hasRoom && isRecord(rawPersist[roomKey]) ? rawPersist[roomKey] : undefined;
       fullPersistence[roomKey] = rawRecord
-        ? restoreCompactedPersistenceRecord(roomKey, rawRecord)
+        ? restoreCompactedPersistenceRecord(roomKey, rawRecord as RoomPersistenceState)
         : createEmptyRoomPersistence();
     }
-    if (parsed.state.persistence) {
-      for (const [k, v] of Object.entries(parsed.state.persistence)) {
-        fullPersistence[k] = restoreCompactedPersistenceRecord(k, v);
+    if (rawPersist) {
+      for (const key of Object.keys(rawPersist)) {
+        if (
+          !isSafeRoomKey(key) ||
+          Object.prototype.hasOwnProperty.call(fullPersistence, key) ||
+          !isRecord(rawPersist[key])
+        ) {
+          continue;
+        }
+        fullPersistence[key] = restoreCompactedPersistenceRecord(
+          key,
+          rawPersist[key] as RoomPersistenceState
+        );
       }
     }
     parsed.state.persistence = fullPersistence;

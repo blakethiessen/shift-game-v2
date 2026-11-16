@@ -5,7 +5,12 @@ import {
   knockbackBlobby,
   spawnInitialTearsForRoom,
 } from '../../src/core/monstersAndTears';
-import { createDefaultPlayerInput, Direction, SeededRandom } from '../../src/shared/types';
+import {
+  BlobbyEntity,
+  createDefaultPlayerInput,
+  Direction,
+  SeededRandom,
+} from '../../src/shared/types';
 
 describe('monstersAndTears', () => {
   it('detects Blobby sightline (adjacent, knight-move, straight line of sight) and handles empty path safely', () => {
@@ -250,5 +255,142 @@ describe('monstersAndTears', () => {
     engine.loadRoom('keyIntro');
     expect(engine.getState().roomsEntered).toBe(3);
     expect(engine.getState().room.tears.length).toBe(0);
+  });
+
+  it('detects 1-tile diagonal and vertical knight-move sightlines unless corners are blocked', () => {
+    const engine = new GameEngine(42);
+    engine.loadRoom('monsterIntro');
+    const grid = engine.getState().room.worlds.dangerous;
+
+    // Clear 5x5 walkable area around (7, 10)
+    for (let x = 5; x <= 9; x++) {
+      for (let y = 8; y <= 12; y++) {
+        grid.cells[x][y].collides = false;
+        grid.cells[x][y].noLight = false;
+        grid.cells[x][y].floorGid = 926;
+      }
+    }
+
+    // 1-tile diagonal & vertical knight-move should detect
+    expect(isTargetDetected(grid, { x: 7, y: 10 }, { x: 8, y: 11 })).toBe(true);
+    expect(isTargetDetected(grid, { x: 7, y: 10 }, { x: 8, y: 12 })).toBe(true);
+
+    // Blocking one corner of 1-tile diagonal blocks sightline
+    grid.cells[8][10].collides = true;
+    expect(isTargetDetected(grid, { x: 7, y: 10 }, { x: 8, y: 11 })).toBe(false);
+  });
+
+  it('accelerates Blobby smoothly along both axes on diagonal chase without tunneling walls on knockback', () => {
+    const engine = new GameEngine(42);
+    engine.loadRoom('monsterIntro');
+    const state = engine.getState();
+    const grid = state.room.worlds.dangerous;
+
+    // Clear (5..9, 8..12) except put a 1-tile wall at (6, 9) behind blobby
+    for (let x = 4; x <= 10; x++) {
+      for (let y = 7; y <= 13; y++) {
+        grid.cells[x][y].collides = false;
+        grid.cells[x][y].noLight = false;
+        grid.cells[x][y].floorGid = 926;
+      }
+    }
+    const blobby = grid.blobbies[0];
+    blobby.x = 7 * 25;
+    blobby.y = 10 * 25;
+    blobby.state = 'Seeking';
+    blobby.path = [{ x: 8, y: 11 }];
+    blobby.nextStep = { x: 8, y: 11 };
+    blobby.oldTargetCoord = { x: 8, y: 11 };
+    blobby.currentSpeed = 0.8;
+    blobby.velocity = { x: 0.4, y: 0.4 };
+    state.players[1].x = 8 * 25;
+    state.players[1].y = 11 * 25;
+
+    for (let i = 0; i < 5; i++) {
+      engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
+    }
+    // Both vx and vy must stay symmetric during diagonal acceleration!
+    expect(blobby.velocity.x).toBeCloseTo(blobby.velocity.y, 4);
+
+    // Now test knockback against a 1-tile solid wall directly UpLeft at (6, 9)
+    blobby.x = 7 * 25;
+    blobby.y = 10 * 25;
+    blobby.velocity = { x: 1, y: 1 }; // knocks back toward (-1, -1) -> (6, 9)
+    grid.cells[6][9].collides = true; // solid wall behind blobby
+    grid.cells[6][10].collides = true; // orthogonal wall
+    grid.cells[7][9].collides = true; // orthogonal wall
+    knockbackBlobby(grid, blobby, state.players[1]);
+    // Must NOT tunnel across wall (6, 9) to (5, 8) or (4, 7)!
+    expect(blobby.nextStep?.x ?? 7).toBeGreaterThanOrEqual(7);
+    expect(blobby.nextStep?.y ?? 10).toBeGreaterThanOrEqual(10);
+  });
+
+  it('never spawns initial tears or Blobbies into solid walls in dangerousGrid', () => {
+    const engine = new GameEngine(42);
+    const state = engine.getState();
+
+    // Put a tear on tile (5, 5) which is walkable in neutral, solid wall in dangerous
+    state.room.worlds.neutral.cells[5][5].collides = false;
+    state.room.worlds.neutral.cells[5][5].floorGid = 926;
+    state.room.worlds.dangerous.cells[5][5].collides = true;
+    state.room.worlds.dangerous.cells[5][5].noLight = true;
+
+    state.room.tears = [
+      {
+        id: 't-wall-d',
+        x: 5 * 25,
+        y: 5 * 25,
+        angle: Direction.Horizontal,
+        stage: 0,
+        growthTimerMs: 3000,
+        hasSpread: false,
+      },
+    ];
+    state.room.blobbySpawnTimerMs = 24000;
+    engine.tick(16.67, createDefaultPlayerInput(), createDefaultPlayerInput());
+
+    // Neutral spawns a Blobby at (5,5), and dangerous ejects its Blobby onto an unblocked adjacent tile rather than inside wall (5,5)!
+    expect(state.room.worlds.neutral.blobbies.length).toBe(1);
+    expect(state.room.worlds.dangerous.blobbies.length).toBe(1);
+    const dBlobby = state.room.worlds.dangerous.blobbies[0];
+    expect(dBlobby.x === 5 * 25 && dBlobby.y === 5 * 25).toBe(false);
+  });
+
+  it('knocks a retreating/wandering Blobby away from the attacking player rather than backward through them', () => {
+    const engine = new GameEngine(42);
+    const state = engine.getState();
+    const grid = state.room.worlds.dangerous;
+    for (let x = 2; x <= 9; x++) {
+      grid.cells[x][8].collides = false;
+      grid.cells[x][8].floorGid = 926;
+    }
+
+    const player = state.players[0];
+    player.x = 4 * 25;
+    player.y = 8 * 25;
+    player.direction = Direction.Right;
+
+    const blobby: BlobbyEntity = {
+      id: 'b_retreat',
+      world: 'dangerous',
+      x: 5 * 25,
+      y: 8 * 25,
+      velocity: { x: 0.8, y: 0 },
+      direction: Direction.Right,
+      state: 'Wandering',
+      currentSpeed: 0.8,
+      wanderTimerTicks: 0,
+      wanderIntervalTicks: 60,
+      eatingTimerTicks: 0,
+      path: [],
+      nextStepIdx: 0,
+      nextStep: null,
+      oldTargetCoord: { x: 8, y: 8 },
+    };
+
+    knockbackBlobby(grid, blobby, player);
+    expect(blobby.nextStep).not.toBeNull();
+    // Blobby was east of the player at x=5 -> knockback target must move further east (x > 5), never west through player at x=4!
+    expect(blobby.nextStep!.x).toBeGreaterThan(5);
   });
 });

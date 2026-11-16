@@ -99,6 +99,8 @@ export interface PlayerState {
   isMoving: boolean;
   boxColliding: boolean;
   regenTimerMs: number;
+  attackCooldownMs?: number;
+  fireDamageCooldownMs?: number;
   inventory: ItemData[];
   currentItemIndex: number;
   inventoryDisplayTimerMs: number;
@@ -399,6 +401,7 @@ export interface PersistedTearRecord {
   y: number;
   angle: Direction;
   stage: number;
+  hasSpread?: boolean;
 }
 
 export interface RoomPersistenceState {
@@ -560,6 +563,24 @@ export interface GameState {
   players: [PlayerState, PlayerState];
   persistence: Record<string, RoomPersistenceState>;
   events: GameEvent[];
+  inputSeqState?: {
+    p1: {
+      useItemSeq: number;
+      interactSeq: number;
+      inventoryCycleSeq: number;
+      inventoryDropSeq: number;
+      shiftRequestSeq: number;
+      pingSeq: number;
+    };
+    p2: {
+      useItemSeq: number;
+      interactSeq: number;
+      inventoryCycleSeq: number;
+      inventoryDropSeq: number;
+      shiftRequestSeq: number;
+      pingSeq: number;
+    };
+  };
 }
 
 // ============================================================================
@@ -579,6 +600,7 @@ export interface PlayerInput {
   shiftRequestSeq: number;
   pingSeq: number;
   pingKind?: PingKind;
+  pauseToggleSeq?: number;
 }
 
 export interface PlayerKeyBindings {
@@ -713,6 +735,7 @@ export interface IAudioManager {
   toggleMute(): boolean;
   isMuted(): boolean;
   stopAll(): void;
+  destroy?(): void;
 }
 
 export interface DirectionalState {
@@ -754,6 +777,7 @@ export interface IInputManager {
   ): void;
   resetBindings?(): void;
   resetGamepadBindings?(): void;
+  resetSequenceCounters?(): void;
   formatKeyLabel(code: string): string;
   setVirtualDirection?(playerId: PlayerId, dir: Partial<DirectionalState>): void;
   triggerVirtualAction?(playerId: PlayerId, action: VirtualAction): void;
@@ -795,8 +819,8 @@ export interface IPeerManager {
   hostRoom(customCode?: string): Promise<string>;
   joinRoom(roomCode: string): Promise<void>;
   sendPacket(packet: NetPacket): void;
-  onPacket(handler: (packet: NetPacket) => void): void;
-  onStateChange(handler: (state: ConnectionState, error?: string) => void): void;
+  onPacket(handler: (packet: NetPacket) => void): () => void;
+  onStateChange(handler: (state: ConnectionState, error?: string) => void): () => void;
   getRoomCode(): string | null;
   getConnectionState(): ConnectionState;
   getRttMs(): number;

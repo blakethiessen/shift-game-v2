@@ -15,6 +15,7 @@ import {
   BANNER_SPRITES,
   getGidSourceRect,
   getTileSourceRect,
+  tileToSourceRect,
   getWorldObjectSpriteRect,
   getLampSpriteRect,
   getItemSpriteRect,
@@ -514,7 +515,7 @@ describe('spriteAtlas', () => {
         h: 25,
       });
 
-      expect(pilotFire[0]).toEqual({ x: 65 * 25, y: 57 * 25, w: 25, h: 25 });
+      expect(pilotFire[0]).toEqual({ x: 66 * 25, y: 57 * 25, w: 25, h: 25 });
       expect(pilotFire[pilotFire.length - 1]).toEqual({
         x: 69 * 25,
         y: 57 * 25,
@@ -551,6 +552,8 @@ describe('spriteAtlas', () => {
 
       const downLeftDiag = getDimensionTearAnim(Direction.DownLeft, 2);
       expect(downLeftDiag.rotationDeg).toBe(180);
+      // Stage 2 must span cols 11..15 (never rewinding to col 1)
+      expect(downLeftDiag.frames[0].x).toBe(11 * 25);
 
       const upLeftDiag = getDimensionTearAnim(Direction.UpLeft, 3);
       expect(upLeftDiag.rotationDeg).toBe(270);
@@ -558,12 +561,37 @@ describe('spriteAtlas', () => {
       const horiz = getDimensionTearAnim(Direction.Horizontal, 0);
       expect(horiz.family).toBe('spawnHorizontal');
       expect(horiz.rotationDeg).toBe(0);
-      expect(horiz.frames[0]).toEqual({ x: 19 * 25, y: 53 * 25, w: 25, h: 25 });
+      expect(horiz.frames[0]).toEqual({ x: 10 * 25, y: 53 * 25, w: 25, h: 25 });
+
+      // All horizontal tear stages 0..4 stay within spritesheet tear columns 10..33 (never leaking into Player 2 bruised col >= 34)
+      for (let stage = 0; stage < 5; stage++) {
+        const s = getDimensionTearAnim(Direction.Horizontal, stage);
+        for (const frame of s.frames) {
+          expect(frame.x).toBeGreaterThanOrEqual(10 * 25);
+          expect(frame.x).toBeLessThanOrEqual(33 * 25);
+        }
+      }
 
       const vert = getDimensionTearAnim(Direction.Vertical, 4);
       expect(vert.family).toBe('spawnVertical');
       expect(vert.rotationDeg).toBe(0);
       expect(vert.frames[0]).toEqual({ x: 16 * 25, y: 56 * 25, w: 25, h: 25 });
+    });
+
+    it('clamps right-edge column 77 weapon swing frames so x + w <= SPRITESHEET_WIDTH (1949)', () => {
+      const dyingRight = getWeaponSwingFrames(1, 'Broom', Direction.Right, 'Dying');
+      for (const rect of [
+        ...dyingRight.playerTile,
+        ...dyingRight.rightTile,
+        ...dyingRight.upTile,
+        ...dyingRight.downTile,
+      ]) {
+        expect(rect.x + rect.w).toBeLessThanOrEqual(SPRITESHEET_WIDTH);
+        expect(rect.w).toBeGreaterThan(0);
+      }
+      // Specifically column 77 starts at x=1925 and clamps to 24px (1925 + 24 = 1949)
+      const col77Tile = tileToSourceRect(77, 1);
+      expect(col77Tile).toEqual({ x: 1925, y: 25, w: 24, h: 25 });
     });
   });
 });

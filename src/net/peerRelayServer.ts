@@ -37,7 +37,17 @@ interface WsModuleLike {
 
 const WS_OPEN_STATE = 1;
 const DEFAULT_BASE_PATH = '/shift-peerjs';
-const MAX_RELAY_PAYLOAD_BYTES = 4 * 1024 * 1024; // 4 MB
+const MAX_RELAY_PAYLOAD_BYTES = 64 * 1024; // 64 KB
+const MAX_PEERS = 1024;
+const PEER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const RELAYABLE_CLIENT_MESSAGE_TYPES = new Set([
+  'OFFER',
+  'ANSWER',
+  'CANDIDATE',
+  'LEAVE',
+]);
+const HEARTBEAT_CHECK_INTERVAL_MS = 15_000;
+const IDLE_PEER_EVICT_MS = 45_000;
 
 const attachedServers = new WeakSet<object>();
 
@@ -50,6 +60,7 @@ interface RegisteredPeer {
   id: string;
   token: string;
   ws: WsClientLike;
+  lastSeenMs: number;
 }
 
 export function attachPeerRelayServer(
@@ -76,10 +87,44 @@ export function attachPeerRelayServer(
   const peers = new Map<string, RegisteredPeer>();
   let nextAutoId = 1;
 
-  // Handle HTTP GET /shift-peerjs/peerjs/id requests (PeerJS retrieveId API)
-  httpServer.on('request', (req: IncomingMessage, res: ServerResponse) => {
+  // Periodic stale/zombie peer reaper so dead mobile sockets release custom room codes promptly
+  const reaperTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [id, peer] of peers.entries()) {
+      if (
+        peer.ws.readyState !== WS_OPEN_STATE ||
+        now - peer.lastSeenMs > IDLE_PEER_EVICT_MS
+      ) {
+        peers.delete(id);
+        try {
+          peer.ws.close(1001, 'Idle timeout');
+        } catch {
+          // Ignore close errors
+        }
+      }
+    }
+  }, HEARTBEAT_CHECK_INTERVAL_MS);
+  if (typeof (reaperTimer as unknown as { unref?: () => void }).unref === 'function') {
+    (reaperTimer as unknown as { unref: () => void }).unref();
+  }
+  httpServer.once('close', () => {
+    clearInterval(reaperTimer);
+    for (const peer of peers.values()) {
+      try {
+        peer.ws.close(1001, 'Server shutting down');
+      } catch {
+        // Ignore close errors
+      }
+    }
+    peers.clear();
+  });
+
+  const handleIdRequest = (
+    req: IncomingMessage,
+    res: ServerResponse
+  ): boolean => {
     if (!req.url || res.writableEnded || res.headersSent) {
-      return;
+      return false;
     }
     const qIdx = req.url.indexOf('?');
     const pathname = qIdx >= 0 ? req.url.slice(0, qIdx) : req.url;
@@ -90,7 +135,14 @@ export function attachPeerRelayServer(
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store');
       res.end(generatedId);
+      return true;
     }
+    return false;
+  };
+
+  // Handle HTTP GET /shift-peerjs/peerjs/id requests on raw http.Server (unit tests / standalone Node HTTP)
+  httpServer.on('request', (req: IncomingMessage, res: ServerResponse) => {
+    handleIdRequest(req, res);
   });
 
   // Handle WebSocket Upgrade on /shift-peerjs/peerjs?key=peerjs&id=<id>&token=<token>
@@ -115,22 +167,32 @@ export function attachPeerRelayServer(
       const token = (parsedUrl.searchParams.get('token') ?? '').trim();
 
       wss.handleUpgrade(req, socket, head, (ws: WsClientLike) => {
-        if (!peerId) {
+        if (!peerId || !PEER_ID_PATTERN.test(peerId)) {
           ws.send(
             JSON.stringify({
               type: 'ERROR',
-              payload: { msg: 'Missing peer id parameter' },
+              payload: { msg: 'Invalid or missing peer id parameter' },
             })
           );
-          ws.close(1008, 'Missing peer id');
+          ws.close(1008, 'Invalid peer id');
           return;
         }
 
         const existing = peers.get(peerId);
+        if (!existing && peers.size >= MAX_PEERS) {
+          ws.send(
+            JSON.stringify({
+              type: 'ERROR',
+              payload: { msg: 'Relay server capacity reached' },
+            })
+          );
+          ws.close(1013, 'Server full');
+          return;
+        }
         if (
           existing &&
           existing.ws.readyState === WS_OPEN_STATE &&
-          existing.token !== token
+          (!token || existing.token !== token)
         ) {
           ws.send(
             JSON.stringify({
@@ -150,12 +212,18 @@ export function attachPeerRelayServer(
           }
         }
 
-        const entry: RegisteredPeer = { id: peerId, token, ws };
+        const entry: RegisteredPeer = {
+          id: peerId,
+          token,
+          ws,
+          lastSeenMs: Date.now(),
+        };
         peers.set(peerId, entry);
 
         ws.send(JSON.stringify({ type: 'OPEN' }));
 
         ws.on('message', (rawData: unknown) => {
+          entry.lastSeenMs = Date.now();
           let text: string;
           if (typeof rawData === 'string') {
             text = rawData;
@@ -194,6 +262,9 @@ export function attachPeerRelayServer(
           }
 
           if (typeof msg.dst === 'string' && msg.dst.length > 0) {
+            if (!RELAYABLE_CLIENT_MESSAGE_TYPES.has(msg.type)) {
+              return;
+            }
             const dstId = msg.dst;
             const target = peers.get(dstId);
             if (target && target.ws.readyState === WS_OPEN_STATE) {
@@ -235,19 +306,62 @@ export function attachPeerRelayServer(
   );
 }
 
+type ConnectMiddlewareServer = {
+  httpServer: HttpServer | null;
+  middlewares?: {
+    use: (
+      fn: (
+        req: IncomingMessage,
+        res: ServerResponse,
+        next: () => void
+      ) => void
+    ) => void;
+  };
+};
+
+function registerPeerIdMiddleware(
+  server: ConnectMiddlewareServer,
+  basePath: string
+): void {
+  const normalizedBase = basePath.endsWith('/') ? basePath : `${basePath}/`;
+  const idEndpointPath = `${normalizedBase}peerjs/id`;
+  let mwAutoId = 1;
+  server.middlewares?.use((req, res, next) => {
+    if (!req.url || res.writableEnded || res.headersSent) {
+      next();
+      return;
+    }
+    const qIdx = req.url.indexOf('?');
+    const pathname = qIdx >= 0 ? req.url.slice(0, qIdx) : req.url;
+    if (pathname === idEndpointPath) {
+      const randomSuffix = Math.random().toString(36).slice(2, 10);
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end(
+        `shift-client-${Date.now().toString(36)}-mw${mwAutoId++}-${randomSuffix}`
+      );
+      return;
+    }
+    next();
+  });
+}
+
 export function shiftPeerRelayVitePlugin(basePath: string = DEFAULT_BASE_PATH): {
   name: string;
-  configureServer(server: { httpServer: HttpServer | null }): void;
-  configurePreviewServer(server: { httpServer: HttpServer | null }): void;
+  configureServer(server: ConnectMiddlewareServer): void;
+  configurePreviewServer(server: ConnectMiddlewareServer): void;
 } {
   return {
     name: 'shift-peer-relay-server',
     configureServer(server) {
+      registerPeerIdMiddleware(server, basePath);
       if (server.httpServer) {
         attachPeerRelayServer(server.httpServer, basePath);
       }
     },
     configurePreviewServer(server) {
+      registerPeerIdMiddleware(server, basePath);
       if (server.httpServer) {
         attachPeerRelayServer(server.httpServer, basePath);
       }

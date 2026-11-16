@@ -611,28 +611,35 @@ export class GameRenderer implements IGameRenderer {
     dtMs: number
   ): void {
     this.elapsedTimeMs += Math.max(0, dtMs);
-    this.resizeForMode(options.mode);
-    this.consumeFlashEvents(state);
+    this.consumeFlashEvents(state, options);
 
     const ctx = this.ctx;
-    if ('imageSmoothingEnabled' in ctx) {
-      ctx.imageSmoothingEnabled = false;
-    }
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // Handle full-screen ending banners (always rendered at 1000x650 full viewport)
+    // Handle full-screen ending banners before mode resize to avoid 500 <-> 1000 canvas realloc thrash
     if (state.phase === 'gameOver') {
       this.resizeForMode('local');
-      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      if ('imageSmoothingEnabled' in ctx) {
+        ctx.imageSmoothingEnabled = false;
+      }
+      ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
       this.drawFullBanner(BANNER_SPRITES.I_gameOver);
       return;
     }
     if (state.phase === 'victory') {
       this.resizeForMode('local');
-      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      if ('imageSmoothingEnabled' in ctx) {
+        ctx.imageSmoothingEnabled = false;
+      }
+      ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
       this.drawFullBanner(BANNER_SPRITES.I_theEnd);
       return;
     }
+
+    this.resizeForMode(options.mode);
+    if ('imageSmoothingEnabled' in ctx) {
+      ctx.imageSmoothingEnabled = false;
+    }
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
     const requestedZoom = options.cameraZoom ?? DEFAULT_CAMERA_ZOOM;
     const effectiveTestingMode = Boolean(
@@ -883,7 +890,7 @@ export class GameRenderer implements IGameRenderer {
     }
   }
 
-  private consumeFlashEvents(state: GameState): void {
+  private consumeFlashEvents(state: GameState, options: RenderOptions): void {
     if (state.tick <= 1 && state.events.length === 0) {
       this.lastProcessedEventId = 0;
     }
@@ -894,6 +901,13 @@ export class GameRenderer implements IGameRenderer {
       if (ev.eventId > this.lastProcessedEventId) {
         this.lastProcessedEventId = ev.eventId;
         if (ev.type === 'flashScreen' && ev.color) {
+          if (
+            options.mode === 'online' &&
+            ev.playerId !== undefined &&
+            ev.playerId !== options.localPlayerId
+          ) {
+            continue;
+          }
           this.triggerFlash(
             ev.color,
             ev.durationMs ?? 350,
@@ -1363,7 +1377,12 @@ export class GameRenderer implements IGameRenderer {
     camera?: CameraViewport,
     dtMs: number = 0
   ): void {
-    // 1. Typewriter Scrolling Popup Text (120px wide in screen space, up to 4 visible lines, no bounding box)
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.rect(offsetX, 0, DIM_WIDTH_PX, DIM_HEIGHT_PX);
+    this.ctx.clip();
+    try {
+      // 1. Typewriter Scrolling Popup Text (120px wide in screen space, up to 4 visible lines, no bounding box)
     const tracker = this.popupTypewriterState[player.id];
     if (player.activePopupText) {
       const formatted = formatPopupText(
@@ -1454,6 +1473,9 @@ export class GameRenderer implements IGameRenderer {
     if (partner.ping?.active) {
       this.renderPingRipple(partner.ping, offsetX, '#f43f5e', camera);
     }
+    } finally {
+      this.ctx.restore();
+    }
   }
 
   private renderPingRipple(
@@ -1504,7 +1526,7 @@ export class GameRenderer implements IGameRenderer {
 
     const cx = offsetX + localCx;
     const cy = localCy;
-    const progress = 1 - Math.max(0, Math.min(1, ping.remainingMs / 2500));
+    const progress = 1 - Math.max(0, Math.min(1, ping.remainingMs / 3000));
     const radius = 10 + progress * 28;
     const label = ping.kind.toUpperCase();
 
@@ -1643,7 +1665,7 @@ export class GameRenderer implements IGameRenderer {
 
       const ratio = Math.max(
         0,
-        Math.min(1, state.shiftRequest.remainingMs / 3000)
+        Math.min(1, state.shiftRequest.remainingMs / 4000)
       );
       this.ctx.fillStyle = hasWallHazard ? '#ef4444' : '#38bdf8';
       this.ctx.fillRect(

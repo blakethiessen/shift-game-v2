@@ -547,4 +547,179 @@ describe('AudioManager', () => {
       expect(audio.getActiveChannelCount()).toBe(1);
     });
   });
+
+  describe('Audio Lifecycle, Decode Failures, Music Reset & Dying Phase', () => {
+    it('negative-caches failed decode paths, cleans up failed playSound channels, and clears track after one-shot playMusicVolumeTest ends', async () => {
+      const fetchMock = vi.fn().mockRejectedValue(new Error('404 Not Found'));
+      const createdSources: Array<{ onended: (() => void) | null; stop: any; start: any; disconnect: any }> = [];
+      const mockCtx = {
+        state: 'interrupted',
+        currentTime: 0,
+        destination: {},
+        resume: vi.fn(async () => {
+          mockCtx.state = 'running';
+        }),
+        createGain: vi.fn(() => ({
+          gain: { value: 1, setValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn() },
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        })),
+        createBiquadFilter: vi.fn(() => ({
+          type: 'lowpass',
+          frequency: { value: 350, setValueAtTime: vi.fn() },
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        })),
+        createBufferSource: vi.fn(() => {
+          const src = {
+            buffer: null,
+            loop: false,
+            onended: null as (() => void) | null,
+            connect: vi.fn(),
+            disconnect: vi.fn(),
+            start: vi.fn(),
+            stop: vi.fn(),
+          };
+          createdSources.push(src);
+          return src;
+        }),
+        decodeAudioData: vi.fn(async () => ({ duration: 1.0 })),
+      };
+
+      const mgr = new AudioManager({
+        createAudioContext: () => mockCtx as any,
+        fetchFn: fetchMock as any,
+      });
+      await mgr.init();
+      // Interrupted context must be resumed by ensureContextResumed
+      expect(mockCtx.resume).toHaveBeenCalledTimes(1);
+
+      mgr.playSound('error');
+      await new Promise((r) => setTimeout(r, 10));
+      // Failed channel must be cleaned out of active channels, and path negative-cached so second call skips fetch
+      expect(mgr.getActiveChannelCount()).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      mgr.playSound('error');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Now test playMusicVolumeTest clearing currentMusicTrack upon natural end
+      fetchMock.mockResolvedValue({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) });
+      mgr.playMusicVolumeTest('ambience2');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(mgr.getCurrentMusicTrack()).toBe('ambience2');
+      const oneShotSrc = createdSources[createdSources.length - 1];
+      oneShotSrc.onended?.();
+      expect(mgr.getCurrentMusicTrack()).toBeNull();
+    });
+
+    it('silences active loops and stops threat music when phase becomes dying or non-playing', () => {
+      const state = createMockGameState();
+      state.players[0].isMoving = true;
+      state.room.worlds.dangerous.blobbies.push({
+        id: 'b_1',
+        world: 'dangerous',
+        x: 50,
+        y: 50,
+        velocity: { x: 0, y: 0 },
+        direction: Direction.Down,
+        state: 'Seeking',
+        currentSpeed: 1,
+        wanderTimerTicks: 0,
+        wanderIntervalTicks: 60,
+        eatingTimerTicks: 0,
+        path: [],
+        nextStepIdx: 0,
+        nextStep: null,
+        oldTargetCoord: { x: 2, y: 2 },
+      });
+      audio.updateAmbientAndLoops(state, 1, 'local');
+      expect(audio.getActiveLoops().walk_p1?.active).toBe(true);
+      expect(audio.getActiveLoops().blobbyTracking?.active).toBe(true);
+      expect(audio.getCurrentMusicTrack()).toBeTruthy();
+
+      state.phase = 'dying';
+      audio.updateAmbientAndLoops(state, 1, 'local');
+      expect(audio.getActiveLoops().walk_p1?.active).toBeFalsy();
+      expect(audio.getActiveLoops().blobbyTracking?.active).toBeFalsy();
+      expect(audio.getCurrentMusicTrack()).toBeNull();
+    });
+
+    it('does not orphan a newly started loop during async load race and cleans up listener/AudioContext on destroy()', async () => {
+      let resolveFetch!: (ab: ArrayBuffer) => void;
+      const closeSpy = vi.fn(async () => {});
+      const sources: Array<{ stop: ReturnType<typeof vi.fn>; start: ReturnType<typeof vi.fn> }> = [];
+      const addSpy = vi.fn();
+      const removeSpy = vi.fn();
+      vi.stubGlobal('document', {
+        hidden: false,
+        addEventListener: addSpy,
+        removeEventListener: removeSpy,
+      });
+      try {
+        const mgr = new AudioManager({
+          createAudioContext: () =>
+            ({
+              state: 'running',
+              destination: {},
+              close: closeSpy,
+              suspend: vi.fn(async () => {}),
+              resume: vi.fn(async () => {}),
+              createGain: () => ({ gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }),
+              createBiquadFilter: () => ({
+                type: 'lowpass',
+                frequency: { value: 20000 },
+                connect: vi.fn(),
+                disconnect: vi.fn(),
+              }),
+              decodeAudioData: vi.fn(async () => ({ duration: 1 } as AudioBuffer)),
+              createBufferSource: () => {
+                const s = {
+                  buffer: null,
+                  loop: false,
+                  playbackRate: { value: 1 },
+                  connect: vi.fn(),
+                  disconnect: vi.fn(),
+                  start: vi.fn(),
+                  stop: vi.fn(),
+                };
+                sources.push(s);
+                return s;
+              },
+            }) as unknown as AudioContext,
+          fetchFn: vi.fn(
+            () =>
+              new Promise((res) => {
+                resolveFetch = (ab: ArrayBuffer) =>
+                  res({ ok: true, arrayBuffer: async () => ab } as Response);
+              })
+          ) as unknown as typeof fetch,
+        });
+
+        await mgr.init();
+        expect(addSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+        const st = createMockGameState();
+        st.players[0].isMoving = true;
+        mgr.updateAmbientAndLoops(st, 1, 'local'); // loopState1 starts loading
+        st.players[0].isMoving = false;
+        mgr.updateAmbientAndLoops(st, 1, 'local'); // loopState1 stopped before resolve
+        st.players[0].isMoving = true;
+        mgr.updateAmbientAndLoops(st, 1, 'local'); // loopState2 starts waiting on same load promise
+
+        resolveFetch(new ArrayBuffer(8));
+        await new Promise((r) => setTimeout(r, 15));
+
+        expect(sources).toHaveLength(1);
+        expect(sources[0].start).toHaveBeenCalledTimes(1);
+        mgr.stopAll();
+        expect(sources[0].stop).toHaveBeenCalledTimes(1);
+
+        mgr.destroy();
+        expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+        expect(closeSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
 });

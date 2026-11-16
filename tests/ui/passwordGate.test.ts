@@ -207,5 +207,13 @@ describe('PasswordGate', () => {
       expect(toggleRuleMatch).toBeTruthy();
       expect(toggleRuleMatch![1]).toContain('flex-shrink: 0');
     });
+
+    it('hides the persistent LOCK button during active gameplay via body.shift-in-gameplay', () => {
+      const css = readFileSync(
+        resolve(__dirname, '../../src/style.css'),
+        'utf-8'
+      );
+      expect(css).toMatch(/body\.shift-in-gameplay\s+\.password-gate-relock/);
+    });
   });
 });

@@ -19,7 +19,7 @@ import {
   WorldGridState,
   WorldType,
 } from '../shared/types';
-import { findPath, isTileBlocked, isTileInBounds } from './pathfinding';
+import { findNearestFreeTile, findPath, isTileBlocked, isTileInBounds } from './pathfinding';
 import { emitEvent, isWithinTileRange, takeDamage } from './playerLogic';
 
 const CHASING_SPEED = 2.4;
@@ -41,12 +41,31 @@ export function isTargetDetected(
     return true;
   }
 
-  // Knight-move sightline with unblocked intermediate corner tiles
+  // 1-tile diagonal adjacency with unblocked orthogonal corners
+  if (Math.abs(dx) === 1 && Math.abs(dy) === 1) {
+    if (
+      !isTileBlocked(grid, blobbyCoord.x + dx, blobbyCoord.y) &&
+      !isTileBlocked(grid, blobbyCoord.x, blobbyCoord.y + dy)
+    ) {
+      return true;
+    }
+  }
+
+  // Horizontal & vertical knight-move sightlines with unblocked intermediate corner tiles
   if (Math.abs(dx) === 2 && Math.abs(dy) === 1) {
     const midX = blobbyCoord.x + Math.sign(dx);
     if (
       !isTileBlocked(grid, midX, blobbyCoord.y) &&
       !isTileBlocked(grid, midX, targetCoord.y)
+    ) {
+      return true;
+    }
+  }
+  if (Math.abs(dx) === 1 && Math.abs(dy) === 2) {
+    const midY = blobbyCoord.y + Math.sign(dy);
+    if (
+      !isTileBlocked(grid, blobbyCoord.x, midY) &&
+      !isTileBlocked(grid, targetCoord.x, midY)
     ) {
       return true;
     }
@@ -150,18 +169,21 @@ function hasBlobbyReachedTile(
   const vx = blobby.velocity.x;
   const vy = blobby.velocity.y;
 
-  let reached = false;
-  if (vy === 0) {
-    reached = (blobby.x - posX) * (blobby.x + vx - posX) <= 0;
-  } else if (vx === 0) {
-    reached = (blobby.y - posY) * (blobby.y + vy - posY) <= 0;
-  } else {
-    reached =
-      (blobby.x - posX) * (blobby.x + vx - posX) <= 0 ||
-      (blobby.y - posY) * (blobby.y + vy - posY) <= 0;
+  const crossedX =
+    vx === 0 || (blobby.x - posX) * (blobby.x + vx - posX) <= 0;
+  const crossedY =
+    vy === 0 || (blobby.y - posY) * (blobby.y + vy - posY) <= 0;
+
+  if (crossedX && vx !== 0) {
+    blobby.x = posX;
+    blobby.velocity.x = 0;
+  }
+  if (crossedY && vy !== 0) {
+    blobby.y = posY;
+    blobby.velocity.y = 0;
   }
 
-  if (reached) {
+  if (crossedX && crossedY) {
     blobby.x = posX;
     blobby.y = posY;
     return true;
@@ -172,47 +194,42 @@ function hasBlobbyReachedTile(
 function accelerateBlobby(blobby: BlobbyEntity): void {
   const diagFactor =
     blobby.velocity.x !== 0 && blobby.velocity.y !== 0 ? 0.7 : 1;
+  const maxComponentSpeed = CHASING_SPEED * diagFactor;
+  let accelerated = false;
 
   if (blobby.velocity.x > 0) {
-    if (blobby.velocity.x >= CHASING_SPEED) {
-      blobby.velocity.x = CHASING_SPEED * diagFactor;
-    } else {
-      blobby.velocity.x += ACCELERATION * diagFactor;
-      blobby.currentSpeed = Math.min(
-        CHASING_SPEED,
-        blobby.currentSpeed + ACCELERATION
-      );
-    }
+    blobby.velocity.x = Math.min(
+      maxComponentSpeed,
+      blobby.velocity.x + ACCELERATION * diagFactor
+    );
+    accelerated = true;
   } else if (blobby.velocity.x < 0) {
-    if (blobby.velocity.x <= -CHASING_SPEED) {
-      blobby.velocity.x = -CHASING_SPEED * diagFactor;
-    } else {
-      blobby.velocity.x -= ACCELERATION * diagFactor;
-      blobby.currentSpeed = Math.min(
-        CHASING_SPEED,
-        blobby.currentSpeed + ACCELERATION
-      );
-    }
-  } else if (blobby.velocity.y > 0) {
-    if (blobby.velocity.y >= CHASING_SPEED) {
-      blobby.velocity.y = CHASING_SPEED * diagFactor;
-    } else {
-      blobby.velocity.y += ACCELERATION * diagFactor;
-      blobby.currentSpeed = Math.min(
-        CHASING_SPEED,
-        blobby.currentSpeed + ACCELERATION
-      );
-    }
+    blobby.velocity.x = Math.max(
+      -maxComponentSpeed,
+      blobby.velocity.x - ACCELERATION * diagFactor
+    );
+    accelerated = true;
+  }
+
+  if (blobby.velocity.y > 0) {
+    blobby.velocity.y = Math.min(
+      maxComponentSpeed,
+      blobby.velocity.y + ACCELERATION * diagFactor
+    );
+    accelerated = true;
   } else if (blobby.velocity.y < 0) {
-    if (blobby.velocity.y <= -CHASING_SPEED) {
-      blobby.velocity.y = -CHASING_SPEED * diagFactor;
-    } else {
-      blobby.velocity.y -= ACCELERATION * diagFactor;
-      blobby.currentSpeed = Math.min(
-        CHASING_SPEED,
-        blobby.currentSpeed + ACCELERATION
-      );
-    }
+    blobby.velocity.y = Math.max(
+      -maxComponentSpeed,
+      blobby.velocity.y - ACCELERATION * diagFactor
+    );
+    accelerated = true;
+  }
+
+  if (accelerated) {
+    blobby.currentSpeed = Math.min(
+      CHASING_SPEED,
+      blobby.currentSpeed + ACCELERATION
+    );
   }
 }
 
@@ -224,35 +241,58 @@ export function knockbackBlobby(
   const blobbyCoord = localPixelToTile(blobby.x, blobby.y);
   const playerCoord = localPixelToTile(player.x, player.y);
 
-  let stepX = -Math.sign(blobby.velocity.x);
-  let stepY = -Math.sign(blobby.velocity.y);
+  let stepX = Math.sign(blobbyCoord.x - playerCoord.x);
+  let stepY = Math.sign(blobbyCoord.y - playerCoord.y);
 
-  if (stepX === 0 && stepY === 0) {
-    stepX = Math.sign(blobbyCoord.x - playerCoord.x);
-    stepY = Math.sign(blobbyCoord.y - playerCoord.y);
-  }
   if (stepX === 0 && stepY === 0) {
     if (player.direction === Direction.Left) stepX = -1;
     else if (player.direction === Direction.Right) stepX = 1;
     else if (player.direction === Direction.Up) stepY = -1;
-    else stepY = 1;
+    else if (player.direction === Direction.Down) stepY = 1;
+    else if (player.direction === Direction.UpLeft) {
+      stepX = -1;
+      stepY = -1;
+    } else if (player.direction === Direction.UpRight) {
+      stepX = 1;
+      stepY = -1;
+    } else if (player.direction === Direction.DownLeft) {
+      stepX = -1;
+      stepY = 1;
+    } else if (player.direction === Direction.DownRight) {
+      stepX = 1;
+      stepY = 1;
+    } else {
+      stepY = 1;
+    }
   }
 
   let targetX = blobbyCoord.x;
   let targetY = blobbyCoord.y;
 
+  const canStepTile = (fromX: number, fromY: number, toX: number, toY: number): boolean => {
+    if (isTileBlocked(grid, toX, toY)) return false;
+    if (fromX !== toX && fromY !== toY) {
+      if (isTileBlocked(grid, fromX, toY) || isTileBlocked(grid, toX, fromY)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   for (let k = 1; k <= 3; k++) {
-    const candX = blobbyCoord.x + stepX * k;
-    const candY = blobbyCoord.y + stepY * k;
-    if (!isTileBlocked(grid, candX, candY)) {
+    const candX = targetX + stepX;
+    const candY = targetY + stepY;
+    if (canStepTile(targetX, targetY, candX, candY)) {
       targetX = candX;
       targetY = candY;
-    } else if (stepX !== 0 && stepY !== 0) {
-      // If diagonal fallback is blocked, try orthogonal fallback along X or Y
-      if (!isTileBlocked(grid, blobbyCoord.x + stepX * k, targetY)) {
-        targetX = blobbyCoord.x + stepX * k;
-      } else if (!isTileBlocked(grid, targetX, blobbyCoord.y + stepY * k)) {
-        targetY = blobbyCoord.y + stepY * k;
+    } else if (stepX !== 0 && stepY !== 0 && targetX === blobbyCoord.x && targetY === blobbyCoord.y) {
+      // Only slide along an orthogonal wall at step 1 without jumping past walls
+      if (!isTileBlocked(grid, targetX + stepX, targetY)) {
+        targetX += stepX;
+        stepY = 0;
+      } else if (!isTileBlocked(grid, targetX, targetY + stepY)) {
+        targetY += stepY;
+        stepX = 0;
       } else {
         break;
       }
@@ -491,7 +531,9 @@ export function spreadTear(state: GameState, tear: DimensionTearEntity): void {
   for (let nx = coord.x - 1; nx <= coord.x + 1; nx++) {
     for (let ny = coord.y - 1; ny <= coord.y + 1; ny++) {
       if (nx === coord.x && ny === coord.y) continue;
-      if (!isValidTearCell(neutralGrid, nx, ny)) continue;
+      if (!isValidTearCell(neutralGrid, nx, ny)) {
+        continue;
+      }
 
       const px = nx * TILE_SIZE_PX;
       const py = ny * TILE_SIZE_PX;
@@ -533,12 +575,19 @@ export function shrinkTear(state: GameState, tear: DimensionTearEntity): void {
     if (idx !== -1) {
       state.room.tears.splice(idx, 1);
     }
-    state.room.pendingRegrowths.push({
-      x: tear.x,
-      y: tear.y,
-      angle: tear.angle,
-      remainingMs: TEAR_REGROWTH_MS,
-    });
+    const existingRegrowth = state.room.pendingRegrowths.find(
+      (r) => r.x === tear.x && r.y === tear.y
+    );
+    if (existingRegrowth) {
+      existingRegrowth.remainingMs = TEAR_REGROWTH_MS;
+    } else {
+      state.room.pendingRegrowths.push({
+        x: tear.x,
+        y: tear.y,
+        angle: tear.angle,
+        remainingMs: TEAR_REGROWTH_MS,
+      });
+    }
   }
 }
 
@@ -559,10 +608,14 @@ export function spawnInitialTearsForRoom(
   }
 
   const neutralGrid = state.room.worlds.neutral;
+  const dangerousGrid = state.room.worlds.dangerous;
   const validCoords: TileCoord[] = [];
   for (let x = 0; x < DIM_WIDTH_TILES - 1; x++) {
     for (let y = 0; y < DIM_HEIGHT_TILES - 1; y++) {
-      if (isValidTearCell(neutralGrid, x, y)) {
+      if (
+        isValidTearCell(neutralGrid, x, y) &&
+        isValidTearCell(dangerousGrid, x, y)
+      ) {
         validCoords.push({ x, y });
       }
     }
@@ -829,12 +882,20 @@ export function updateMonstersAndTears(
       if (maxExisting < 10) {
         const pickedTear =
           state.room.tears[rng.nextInt(0, state.room.tears.length - 1)];
+        const tearTile = localPixelToTile(pickedTear.x, pickedTear.y);
         for (const world of worlds) {
-          state.room.worlds[world].blobbies.push({
-            id: `${state.roomName}_tear_blobby_${world}_${state.tick}_${state.room.worlds[world].blobbies.length}`,
+          const worldGrid = state.room.worlds[world];
+          const spawnTile = isTileBlocked(worldGrid, tearTile.x, tearTile.y)
+            ? findNearestFreeTile(worldGrid, tearTile, worldGrid.boxes)
+            : tearTile;
+          if (isTileBlocked(worldGrid, spawnTile.x, spawnTile.y)) {
+            continue;
+          }
+          worldGrid.blobbies.push({
+            id: `${state.roomName}_tear_blobby_${world}_${state.tick}_${worldGrid.blobbies.length}`,
             world,
-            x: pickedTear.x,
-            y: pickedTear.y,
+            x: spawnTile.x * TILE_SIZE_PX,
+            y: spawnTile.y * TILE_SIZE_PX,
             velocity: { x: 0, y: 0 },
             direction: Direction.Down,
             state: 'Wandering',

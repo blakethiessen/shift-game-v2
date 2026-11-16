@@ -111,7 +111,10 @@ export function deactivateChest(state: GameState, chest: ChestEntity): void {
 }
 
 export function openSafesInRoom(state: GameState): void {
-  if (state.safePressurePlatesPressed < 2) return;
+  const solvedSafeRooms = Object.values(state.persistence).filter(
+    (p) => p.safePlatesPressedIds.length > 0
+  ).length;
+  if (solvedSafeRooms < 2) return;
 
   const allSafes = [
     ...state.room.worlds.neutral.safes,
@@ -350,12 +353,14 @@ export function updateWorldObjectsAndDoors(
           ...state.room.worlds.neutral.chests,
           ...state.room.worlds.dangerous.chests,
         ]) {
-          emitEvent(state, {
-            type: 'playSound',
-            sound: 'doorLocking',
-            world: chest.world,
-          });
-          deactivateChest(state, chest);
+          if (chest.opened) {
+            emitEvent(state, {
+              type: 'playSound',
+              sound: 'doorLocking',
+              world: chest.world,
+            });
+            deactivateChest(state, chest);
+          }
         }
       }
     } else if (plate.kind === 'door') {
@@ -408,46 +413,46 @@ export function updateWorldObjectsAndDoors(
     }
   }
 
-  // Also ensure safes in safeRoom open if safePressurePlatesPressed >= 2
+  // Also ensure safes in safeRoom open if all 4 SafePressurePlates (across both rooms) are pressed
   openSafesInRoom(state);
 
-  // 2. Active Fires dealing periodic damage (0.5 immediately and every 1000ms)
+  // 2. Active Fires dealing periodic damage (0.5 immediately and every 1000ms per player)
   for (const player of state.players) {
     if (!player.isAlive) continue;
     const world = getWorldForSide(player.side, state.evilOnLeft);
     const grid = state.room.worlds[world];
 
-    for (const fire of grid.fires) {
-      if (!fire.isOn) {
-        fire.damageTimerMs = 0;
-        continue;
-      }
+    const overlappingLitFire = grid.fires.find(
+      (fire) =>
+        fire.isOn &&
+        rectsOverlap(
+          player.x + 3,
+          player.y + 3,
+          player.x + 22,
+          player.y + 22,
+          fire.x,
+          fire.y,
+          fire.x + TILE_SIZE_PX,
+          fire.y + TILE_SIZE_PX
+        )
+    );
 
-      const overlaps = rectsOverlap(
-        player.x + 3,
-        player.y + 3,
-        player.x + 22,
-        player.y + 22,
-        fire.x,
-        fire.y,
-        fire.x + TILE_SIZE_PX,
-        fire.y + TILE_SIZE_PX
-      );
-
-      if (overlaps) {
-        if (fire.damageTimerMs <= 0) {
-          takeDamage(state, player.id, 0.5);
-          fire.damageTimerMs = 1000;
-        } else {
-          fire.damageTimerMs -= dtMs;
-          if (fire.damageTimerMs <= 0) {
-            takeDamage(state, player.id, 0.5);
-            fire.damageTimerMs += 1000;
-          }
-        }
+    if (overlappingLitFire) {
+      const currentCooldown = player.fireDamageCooldownMs ?? 0;
+      if (currentCooldown <= 0) {
+        takeDamage(state, player.id, 0.5);
+        player.fireDamageCooldownMs = 1000;
       } else {
-        fire.damageTimerMs = 0;
+        const nextCooldown = currentCooldown - dtMs;
+        if (nextCooldown <= 0) {
+          takeDamage(state, player.id, 0.5);
+          player.fireDamageCooldownMs = nextCooldown + 1000;
+        } else {
+          player.fireDamageCooldownMs = nextCooldown;
+        }
       }
+    } else {
+      player.fireDamageCooldownMs = 0;
     }
   }
 
